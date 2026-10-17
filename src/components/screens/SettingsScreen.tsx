@@ -6,16 +6,16 @@ import {
   Vibrate,
   Shield,
   Eye,
-  Award,
   Type,
   RotateCcw,
   CheckCircle2,
   Sparkles,
+  Volume2,
 } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import { SUPPORTED_LANGUAGES } from '@/lib/translations';
 import { SupportedLanguage } from '@/lib/types';
-import { triggerHaptic } from '@/lib/speech';
+import { triggerHaptic, SpeechService } from '@/lib/speech';
 import { Badge } from '@/components/ui/Badge';
 
 export function SettingsScreen() {
@@ -25,6 +25,7 @@ export function SettingsScreen() {
     preferences,
     updatePreferences,
     goToOnboarding,
+    t,
   } = useApp();
 
   const handleToggleHaptics = () => {
@@ -47,12 +48,14 @@ export function SettingsScreen() {
     updatePreferences({ fontSize: size });
   };
 
+  const voiceDiagnostic = SpeechService.inspectVoice(selectedLanguage);
+
   return (
     <div className="flex flex-col flex-1 px-4 py-4 pb-safe space-y-4 max-w-md mx-auto w-full">
       {/* Title */}
       <div>
-        <h2 className="text-xl sm:text-2xl font-black text-white tracking-tight">App Settings</h2>
-        <p className="text-xs text-slate-400">Accessibility, language & privacy preferences</p>
+        <h2 className="text-xl sm:text-2xl font-black text-white tracking-tight">{t('settings.title')}</h2>
+        <p className="text-xs text-slate-400">{t('settings.subtitle')}</p>
       </div>
 
       {/* 1. SPOKEN OUTPUT LANGUAGE */}
@@ -61,11 +64,26 @@ export function SettingsScreen() {
           <div className="flex items-center gap-2">
             <Globe className="w-4 h-4 text-cyan-400" />
             <span className="text-xs font-bold text-white uppercase tracking-wider">
-              Default Spoken Language
+              {t('settings.spokenLangTitle')}
             </span>
           </div>
           <Badge variant="cyan" size="sm">
             {SUPPORTED_LANGUAGES[selectedLanguage].name}
+          </Badge>
+        </div>
+
+        <p className="text-[11px] text-slate-400">
+          {t('settings.spokenLangDesc')}
+        </p>
+
+        {/* Voice Engine Indicator */}
+        <div className="p-2.5 rounded-xl bg-cyan-950/40 border border-cyan-500/30 flex items-center justify-between text-xs">
+          <div className="flex items-center gap-2">
+            <Volume2 className="w-4 h-4 text-cyan-400 animate-pulse" />
+            <span className="text-slate-300 text-[11px] font-medium">{voiceDiagnostic.selectedVoiceName}</span>
+          </div>
+          <Badge variant="emerald" size="sm">
+            <span>Neural Active</span>
           </Badge>
         </div>
 
@@ -102,7 +120,7 @@ export function SettingsScreen() {
         <div className="flex items-center gap-2">
           <Eye className="w-4 h-4 text-indigo-400" />
           <span className="text-xs font-bold text-white uppercase tracking-wider">
-            Accessibility & Feedback
+            {t('settings.accessTitle')}
           </span>
         </div>
 
@@ -111,10 +129,10 @@ export function SettingsScreen() {
           <div>
             <p className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
               <Vibrate className="w-3.5 h-3.5 text-cyan-400" />
-              <span>Tactile Haptics</span>
+              <span>{t('settings.haptics')}</span>
             </p>
             <p className="text-[10px] text-slate-400">
-              Vibrate phone on state transitions & signing cues
+              {t('settings.hapticsDesc')}
             </p>
           </div>
           <button
@@ -137,9 +155,9 @@ export function SettingsScreen() {
         {/* Reduced Motion Toggle */}
         <div className="flex items-center justify-between py-1 border-t border-white/5">
           <div>
-            <p className="text-xs font-semibold text-slate-200">Reduced Motion</p>
+            <p className="text-xs font-semibold text-slate-200">{t('settings.motion')}</p>
             <p className="text-[10px] text-slate-400">
-              Minimize camera scan lines & waveform animation
+              {t('settings.motionDesc')}
             </p>
           </div>
           <button
@@ -162,9 +180,9 @@ export function SettingsScreen() {
         {/* High Contrast Toggle */}
         <div className="flex items-center justify-between py-1 border-t border-white/5">
           <div>
-            <p className="text-xs font-semibold text-slate-200">High Contrast Palette</p>
+            <p className="text-xs font-semibold text-slate-200">{t('settings.contrast')}</p>
             <p className="text-[10px] text-slate-400">
-              Sharpen text & edge borders for enhanced visibility
+              {t('settings.contrastDesc')}
             </p>
           </div>
           <button
@@ -189,7 +207,7 @@ export function SettingsScreen() {
           <div className="flex items-center justify-between mb-1.5">
             <span className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
               <Type className="w-3.5 h-3.5 text-cyan-400" />
-              <span>Text Scale</span>
+              <span>{t('settings.fontSize')}</span>
             </span>
             <span className="text-[10px] text-cyan-300 font-mono capitalize">
               {preferences.fontSize}
@@ -207,7 +225,7 @@ export function SettingsScreen() {
                     : 'bg-slate-950/40 border-slate-800 text-slate-400'
                 }`}
               >
-                {size === 'normal' ? 'Normal' : size === 'large' ? 'Large' : 'XL'}
+                {size === 'normal' ? t('settings.fontNormal') : size === 'large' ? t('settings.fontLarge') : t('settings.fontExtra')}
               </button>
             ))}
           </div>
@@ -219,14 +237,14 @@ export function SettingsScreen() {
         <div className="flex items-center gap-2">
           <Shield className="w-4 h-4 text-emerald-400" />
           <span className="text-xs font-bold text-white uppercase tracking-wider">
-            Camera Privacy & Consent
+            {t('activity.storageTitle')}
           </span>
         </div>
         <p className="text-[11px] text-slate-300 leading-relaxed">
-          SignBridge AI is designed with strict on-device privacy principles. Video frames captured by your camera are analyzed locally in volatile memory to calculate hand/body landmark coordinates.
+          {t('activity.storagePoint1')}
         </p>
         <p className="text-[10px] text-slate-400 leading-relaxed">
-          No raw facial video is uploaded to cloud servers or saved without your explicit knowledge. Camera permissions are never requested upon page load—only when you deliberately start a camera session.
+          {t('activity.storagePoint2')}
         </p>
       </div>
 
@@ -235,7 +253,7 @@ export function SettingsScreen() {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Sparkles className="w-4 h-4 text-cyan-400" />
-            <span className="text-xs font-bold text-white">About SignBridge AI</span>
+            <span className="text-xs font-bold text-white">{t('settings.aboutTitle')}</span>
           </div>
           <Badge variant="cyan" size="sm">
             v1.0.0
@@ -243,7 +261,7 @@ export function SettingsScreen() {
         </div>
 
         <p className="text-[11px] text-slate-300 leading-relaxed">
-          SignBridge AI is an accessible communication platform bridging the gap between Nigerian Sign Language (NSL) and spoken conversation. Built with lightweight on-device computer vision and native multilingual speech synthesis.
+          {t('settings.aboutDesc')}
         </p>
 
         <div className="pt-2 border-t border-white/5 flex items-center justify-between">
@@ -253,7 +271,7 @@ export function SettingsScreen() {
             className="flex items-center gap-1.5 text-xs text-cyan-400 hover:text-cyan-300 transition-colors cursor-pointer"
           >
             <RotateCcw className="w-3.5 h-3.5" />
-            <span>Revisit Welcome Tour</span>
+            <span>{t('settings.replayOnboarding')}</span>
           </button>
           <span className="text-[10px] text-slate-500">SignBridge AI • Nigeria</span>
         </div>

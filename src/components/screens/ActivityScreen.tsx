@@ -6,19 +6,19 @@ import { useApp } from '@/context/AppContext';
 import { Badge } from '@/components/ui/Badge';
 
 export function ActivityScreen() {
-  const { startLiveSession } = useApp();
+  const { startLiveSession, t } = useApp();
 
   return (
     <div className="flex flex-col flex-1 px-4 py-4 pb-safe space-y-4 max-w-md mx-auto w-full">
       {/* Screen Title & Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-xl sm:text-2xl font-black text-white tracking-tight">Session Activity</h2>
-          <p className="text-xs text-slate-400">Past sign interpretations & transcripts</p>
+          <h2 className="text-xl sm:text-2xl font-black text-white tracking-tight">{t('activity.title')}</h2>
+          <p className="text-xs text-slate-400">{t('activity.subtitle')}</p>
         </div>
         <Badge variant="slate" size="sm">
           <Clock className="w-3 h-3 text-slate-400" />
-          <span>Local Only</span>
+          <span>{t('status.localOnly')}</span>
         </Badge>
       </div>
 
@@ -31,9 +31,9 @@ export function ActivityScreen() {
         </div>
 
         <div className="space-y-1 max-w-[280px]">
-          <h3 className="text-sm sm:text-base font-bold text-white">No Sessions Stored Yet</h3>
+          <h3 className="text-sm sm:text-base font-bold text-white">{t('activity.noSessionsTitle')}</h3>
           <p className="text-xs text-slate-400 leading-relaxed">
-            Encrypted session transcripts and practice records will appear here on your device as you interpret phrases.
+            {t('activity.noSessionsDesc')}
           </p>
         </div>
 
@@ -43,7 +43,7 @@ export function ActivityScreen() {
           onClick={startLiveSession}
           className="mt-1 px-5 py-2.5 rounded-2xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs flex items-center gap-2 shadow-[0_0_20px_rgba(6,182,212,0.35)] active:scale-95 transition-all cursor-pointer"
         >
-          <span>Launch Interpreter</span>
+          <span>{t('activity.launchBtn')}</span>
           <ArrowRight className="w-4 h-4 stroke-[2.5]" />
         </button>
       </div>
@@ -52,23 +52,21 @@ export function ActivityScreen() {
       <div className="p-3.5 rounded-2xl bg-slate-900/40 border border-white/5 space-y-2.5 text-xs text-slate-400">
         <p className="font-semibold text-slate-200 flex items-center gap-1.5">
           <HardDrive className="w-4 h-4 text-cyan-400" />
-          <span>Data Storage & Security</span>
+          <span>{t('activity.storageTitle')}</span>
         </p>
 
         <div className="space-y-2 text-[11px] leading-relaxed">
           <div className="flex items-start gap-2">
             <Lock className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
             <span>
-              <strong className="text-slate-300">Zero Cloud Retention: </strong>
-              Sign language video is processed strictly in local RAM and is never recorded, stored, or sent to remote servers.
+              {t('activity.storagePoint2')}
             </span>
           </div>
 
           <div className="flex items-start gap-2">
             <ShieldCheck className="w-3.5 h-3.5 text-cyan-400 shrink-0 mt-0.5" />
             <span>
-              <strong className="text-slate-300">On-Device Privacy: </strong>
-              Transcripts and preferences remain encrypted locally on your personal device.
+              {t('activity.storagePoint1')}
             </span>
           </div>
         </div>

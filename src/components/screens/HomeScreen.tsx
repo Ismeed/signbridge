@@ -7,12 +7,11 @@ import {
   Play,
   Languages,
   CheckCircle2,
-  Info,
-  ShieldCheck,
   ChevronRight,
   Zap,
   Ear,
   MessageSquare,
+  ShieldCheck,
 } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import { SUPPORTED_LANGUAGES } from '@/lib/translations';
@@ -25,6 +24,7 @@ export function HomeScreen() {
     setLanguage,
     startLiveSession,
     startDemoSession,
+    t,
   } = useApp();
 
   const currentLangInfo = SUPPORTED_LANGUAGES[selectedLanguage];
@@ -36,13 +36,13 @@ export function HomeScreen() {
         <div>
           <div className="flex items-center gap-1.5 text-xs font-medium text-cyan-400">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            <span className="text-emerald-400 font-semibold">Live Translation Active</span>
+            <span className="text-emerald-400 font-semibold">{t('status.liveActive')}</span>
           </div>
           <h2 className="text-xl sm:text-2xl font-black text-white tracking-tight mt-0.5">
             {currentLangInfo.greeting}!
           </h2>
           <p className="text-xs text-slate-400">
-            Ready to bridge sign language and spoken conversation.
+            {t('home.subtitle')}
           </p>
         </div>
 
@@ -57,12 +57,12 @@ export function HomeScreen() {
         <div className="flex items-center gap-2.5">
           <div className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_8px_#34d399]" />
           <div className="text-[11px]">
-            <span className="font-semibold text-white">Neural Vision Engine: </span>
-            <span className="text-slate-400">Ready for high-speed local gesture capture</span>
+            <span className="font-semibold text-white">{t('status.engineReady')}: </span>
+            <span className="text-slate-400">{t('status.engineDesc')}</span>
           </div>
         </div>
         <Badge variant="cyan" size="sm">
-          <span>Online</span>
+          <span>{t('status.online')}</span>
         </Badge>
       </div>
 
@@ -72,7 +72,7 @@ export function HomeScreen() {
         onClick={startLiveSession}
         role="button"
         tabIndex={0}
-        aria-label="Start Live Session"
+        aria-label={t('home.startLiveTitle')}
         className="relative overflow-hidden p-5 sm:p-6 rounded-3xl bg-gradient-to-br from-[#0c2247] via-[#091b38] to-[#071329] border-2 border-cyan-400/40 shadow-[0_15px_35px_-10px_rgba(6,182,212,0.35)] cursor-pointer group active:scale-[0.98] transition-all"
       >
         {/* Glow corner accent */}
@@ -85,39 +85,39 @@ export function HomeScreen() {
             </div>
             <Badge variant="emerald" size="sm">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
-              <span>Camera Ready</span>
+              <span>{t('status.liveActive')}</span>
             </Badge>
           </div>
 
           <div>
             <h3 className="text-lg sm:text-xl font-black text-white tracking-tight flex items-center gap-1.5">
-              <span>Start Live Session</span>
+              <span>{t('home.startLiveTitle')}</span>
               <ChevronRight className="w-4 h-4 sm:w-5 sm:h-5 text-cyan-400 group-hover:translate-x-1 transition-transform" />
             </h3>
             <p className="text-xs text-slate-300 mt-0.5 max-w-[280px] leading-relaxed">
-              Launch the real-time camera interpreter viewport with gesture tracking overlays.
+              {t('home.startLiveDesc')}
             </p>
           </div>
 
           <div className="pt-2 flex items-center justify-between text-xs border-t border-white/10">
             <span className="text-cyan-300 font-semibold flex items-center gap-1 text-[11px]">
               <Zap className="w-3.5 h-3.5" />
-              Instant Output in {currentLangInfo.name}
+              {currentLangInfo.name}
             </span>
             <span className="px-3 py-1 rounded-xl bg-cyan-400 text-slate-950 font-bold text-xs shadow-md">
-              Launch
+              {t('home.startLiveBtn')}
             </span>
           </div>
         </div>
       </div>
 
-      {/* SECONDARY CARD: Phrase Translation Studio */}
+      {/* SECONDARY CARD: Practice & Demo Mode */}
       <div
         id="card-try-demo"
         onClick={startDemoSession}
         role="button"
         tabIndex={0}
-        aria-label="Phrase Translation Studio"
+        aria-label={t('home.practiceTitle')}
         className="p-3.5 sm:p-4 rounded-2xl bg-slate-900/80 border border-cyan-500/20 hover:border-cyan-500/40 cursor-pointer active:scale-[0.98] transition-all group flex items-center justify-between shadow-lg"
       >
         <div className="flex items-center gap-3">
@@ -126,11 +126,11 @@ export function HomeScreen() {
           </div>
           <div>
             <h4 className="text-sm font-bold text-white group-hover:text-cyan-300 transition-colors flex items-center gap-1">
-              <span>Phrase Translation Studio</span>
+              <span>{t('home.practiceTitle')}</span>
               <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
             </h4>
             <p className="text-[11px] text-slate-400">
-              Select standard Nigerian Sign Language phrases with audio playback
+              {t('home.practiceDesc')}
             </p>
           </div>
         </div>
@@ -143,10 +143,10 @@ export function HomeScreen() {
           <div className="flex items-center gap-2">
             <Languages className="w-4 h-4 text-cyan-400" />
             <span className="text-xs font-bold text-white uppercase tracking-wider">
-              Spoken Output Language
+              {t('home.languagesTitle')}
             </span>
           </div>
-          <span className="text-[10px] text-slate-400">5 Nigerian Options</span>
+          <span className="text-[10px] text-slate-400">{t('home.languagesDesc')}</span>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">

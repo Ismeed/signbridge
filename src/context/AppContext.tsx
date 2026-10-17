@@ -1,8 +1,9 @@
 'use client';
 
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { ActiveScreen, AppTab, SupportedLanguage, UserPreferences } from '@/lib/types';
 import { triggerHaptic } from '@/lib/speech';
+import { LOCALES } from '@/lib/locales';
 
 interface AppContextType {
   activeScreen: ActiveScreen;
@@ -10,6 +11,7 @@ interface AppContextType {
   selectedLanguage: SupportedLanguage;
   preferences: UserPreferences;
   demoModeAutoStart: boolean;
+  t: (key: string) => string;
   navigateToTab: (tab: AppTab) => void;
   startLiveSession: () => void;
   startDemoSession: () => void;
@@ -141,6 +143,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setDemoModeAutoStart(false);
   };
 
+  const t = useCallback(
+    (key: string): string => {
+      const dict = LOCALES[selectedLanguage] || LOCALES.en;
+      return dict[key] || LOCALES.en[key] || key;
+    },
+    [selectedLanguage]
+  );
+
   return (
     <AppContext.Provider
       value={{
@@ -149,6 +159,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         selectedLanguage,
         preferences,
         demoModeAutoStart,
+        t,
         navigateToTab,
         startLiveSession,
         startDemoSession,

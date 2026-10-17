@@ -8,13 +8,11 @@ import {
   RotateCcw,
   Sparkles,
   CheckCircle2,
-  AlertCircle,
   Hand,
   ChevronDown,
   Maximize2,
   Minimize2,
   Info,
-  Tv,
   ArrowRight,
   ShieldCheck,
   UserCheck,
@@ -52,6 +50,7 @@ export function InterpretScreen() {
     preferences,
     demoModeAutoStart,
     consumeDemoAutoStart,
+    t,
   } = useApp();
 
   // Guided demo sequence states
@@ -91,7 +90,7 @@ export function InterpretScreen() {
     };
   }, []);
 
-  // Inspect available voices whenever selected language changes or speech service updates
+  // Inspect available voices whenever selected language changes
   useEffect(() => {
     SpeechService.init();
     const diag = SpeechService.inspectVoice(selectedLanguage);
@@ -106,30 +105,17 @@ export function InterpretScreen() {
     setRevealedWordCount(words.length);
   }, [words.length]);
 
-  // Handle external auto-start from Home "Explore Demo"
-  useEffect(() => {
-    if (demoModeAutoStart) {
-      consumeDemoAutoStart();
-      startGuidedDemo(0);
-    }
-  }, [demoModeAutoStart, consumeDemoAutoStart]);
-
-  /**
-   * Execute real Web Speech API output with strict event driving
-   */
+  // Execute Gemini neural audio output
   const playVoiceOutput = useCallback(
     (textToSpeak: string, langToSpeak: SupportedLanguage) => {
       setPlaybackState('speaking');
       setDemoStep('speaking');
       triggerHaptic('light', preferences.hapticsEnabled);
 
-      const success = SpeechService.speak(textToSpeak, langToSpeak, {
+      SpeechService.speak(textToSpeak, langToSpeak, {
         onStart: () => {
           setPlaybackState('speaking');
           setDemoStep('speaking');
-        },
-        onBoundary: () => {
-          // Word boundary tick
         },
         onEnd: () => {
           setPlaybackState('finished');
@@ -141,18 +127,11 @@ export function InterpretScreen() {
           setDemoStep('complete');
         },
       });
-
-      if (!success) {
-        setPlaybackState('unavailable');
-        setDemoStep('complete');
-      }
     },
     [preferences.hapticsEnabled]
   );
 
-  /**
-   * Progressive word-by-word caption reveal respecting reduced motion
-   */
+  // Progressive word-by-word caption reveal
   const animateCaptionReveal = useCallback(
     (targetWords: string[], onRevealComplete: () => void) => {
       if (preferences.reducedMotion) {
@@ -179,10 +158,7 @@ export function InterpretScreen() {
     [preferences.reducedMotion]
   );
 
-  /**
-   * Step-by-Step Guided Demonstration Flow:
-   * 1. Ready -> 2. Tracking -> 3. Demonstrating -> 4. Captioning -> 5. Voice output -> 6. Complete
-   */
+  // Step-by-Step Guided Demonstration Flow
   const startGuidedDemo = useCallback(
     (phraseIndex: number = activePhraseIndex) => {
       SpeechService.stop();
@@ -194,17 +170,17 @@ export function InterpretScreen() {
       const targetText = targetPhrase.translations[selectedLanguage];
       const targetWordsList = targetText.split(' ');
 
-      // Step 1: Establish tracking / subject check
+      // Step 1: Detect subject
       setDemoStep('tracking');
       triggerHaptic('medium', preferences.hapticsEnabled);
 
       sequenceTimerRef.current = setTimeout(() => {
-        // Step 2: Demonstrating NSL motion
+        // Step 2: Demonstrating gesture
         setDemoStep('demonstrating');
         triggerHaptic('light', preferences.hapticsEnabled);
 
         sequenceTimerRef.current = setTimeout(() => {
-          // Step 3: Progressive Caption Reveal
+          // Step 3: Caption Reveal
           setDemoStep('captioning');
 
           animateCaptionReveal(targetWordsList, () => {
@@ -224,6 +200,14 @@ export function InterpretScreen() {
       playVoiceOutput,
     ]
   );
+
+  // Handle external auto-start from Home "Explore Demo"
+  useEffect(() => {
+    if (demoModeAutoStart) {
+      consumeDemoAutoStart();
+      startGuidedDemo(0);
+    }
+  }, [demoModeAutoStart, consumeDemoAutoStart, startGuidedDemo]);
 
   const stopActiveSpeech = () => {
     SpeechService.stop();
@@ -264,7 +248,6 @@ export function InterpretScreen() {
     const newText = activePhrase.translations[lang];
     setRevealedWordCount(newText.split(' ').length);
 
-    // If currently completed, replay in the newly selected language
     if (demoStep === 'complete' || demoStep === 'speaking') {
       setTimeout(() => {
         playVoiceOutput(newText, lang);
@@ -272,7 +255,6 @@ export function InterpretScreen() {
     }
   };
 
-  // Map guided step to camera viewport state
   const getCameraViewportState = (): InterpretationState => {
     switch (demoStep) {
       case 'tracking':
@@ -302,11 +284,11 @@ export function InterpretScreen() {
         <div className="flex items-center gap-1.5 min-w-0">
           <Badge variant="cyan" size="sm">
             <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-            <span className="font-semibold text-[11px] truncate">AI Vision & Speech</span>
+            <span className="font-semibold text-[11px] truncate">SignBridge AI</span>
           </Badge>
           <span className="text-[10px] font-mono text-emerald-400 bg-emerald-950/40 px-2 py-0.5 rounded-full border border-emerald-500/20 shrink-0 flex items-center gap-1">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            Live Engine
+            {t('status.systemActive')}
           </span>
         </div>
 
@@ -322,18 +304,18 @@ export function InterpretScreen() {
               ? 'bg-cyan-500 text-slate-950 border-cyan-400 shadow-[0_0_12px_rgba(6,182,212,0.5)]'
               : 'bg-slate-900/80 text-cyan-300 border-cyan-500/30 hover:bg-cyan-500/10'
           }`}
-          title="Toggle High-Visibility Showcase Presentation Mode"
-          aria-label="Toggle High-Visibility Showcase Presentation Mode"
+          title="Toggle Showcase View"
+          aria-label="Toggle Showcase View"
         >
           {showcaseMode ? (
             <>
               <Minimize2 className="w-3.5 h-3.5" />
-              <span>Standard View</span>
+              <span>Standard</span>
             </>
           ) : (
             <>
               <Maximize2 className="w-3.5 h-3.5" />
-              <span>Showcase Mode</span>
+              <span>Showcase</span>
             </>
           )}
         </button>
@@ -345,16 +327,16 @@ export function InterpretScreen() {
           <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse shrink-0" />
           <span className="font-medium text-[11px] leading-tight text-slate-300 truncate">
             {isCameraActive
-              ? (isPersonDetected ? 'Subject detected • Ready for gesture recognition' : 'Align body in camera frame')
-              : 'Ready • Launch camera or select sign phrase'}
+              ? (isPersonDetected ? t('interpret.personDetected') : t('interpret.noPerson'))
+              : t('interpret.cameraOffPrompt')}
           </span>
         </div>
         <Badge variant={isCameraActive ? (isPersonDetected ? 'emerald' : 'cyan') : 'slate'} size="sm">
-          {isCameraActive ? (isPersonDetected ? 'Target Locked' : 'Scanning') : 'Camera Standby'}
+          {isCameraActive ? (isPersonDetected ? 'Locked' : 'Scanning') : t('status.online')}
         </Badge>
       </div>
 
-      {/* Live Camera Viewport with Genuine Person Tracking */}
+      {/* Live Camera Viewport */}
       <CameraViewport
         state={getCameraViewportState()}
         isSimulatedDemo={demoStep !== 'ready'}
@@ -367,12 +349,12 @@ export function InterpretScreen() {
         <div className="flex items-center gap-1.5">
           <span className="text-slate-400">Step:</span>
           <span className="font-bold text-cyan-300 uppercase tracking-wider">
-            {demoStep === 'ready' && '1. Ready'}
-            {demoStep === 'tracking' && '2. Detecting Subject'}
-            {demoStep === 'demonstrating' && '3. Tracking Gesture'}
-            {demoStep === 'captioning' && '4. Generating Caption'}
-            {demoStep === 'speaking' && '5. Synthesizing Speech'}
-            {demoStep === 'complete' && '6. Complete'}
+            {demoStep === 'ready' && t('interpret.statusReady')}
+            {demoStep === 'tracking' && t('interpret.statusTracking')}
+            {demoStep === 'demonstrating' && t('interpret.statusDemonstrating')}
+            {demoStep === 'captioning' && t('interpret.statusCaptioning')}
+            {demoStep === 'speaking' && t('interpret.statusSpeaking')}
+            {demoStep === 'complete' && t('interpret.statusComplete')}
           </span>
         </div>
 
@@ -382,16 +364,16 @@ export function InterpretScreen() {
             isPersonDetected ? (
               <span className="flex items-center gap-1 text-emerald-400 text-[10px]">
                 <UserCheck className="w-3 h-3" />
-                <span>Subject Tracked</span>
+                <span>Tracked</span>
               </span>
             ) : (
               <span className="flex items-center gap-1 text-cyan-300 text-[10px]">
                 <UserX className="w-3 h-3 animate-pulse" />
-                <span>Searching Subject</span>
+                <span>Searching</span>
               </span>
             )
           ) : (
-            <span className="text-slate-500 text-[10px]">Camera Standby</span>
+            <span className="text-slate-500 text-[10px]">Standby</span>
           )}
         </div>
       </div>
@@ -407,15 +389,15 @@ export function InterpretScreen() {
               ? 'bg-amber-500 text-slate-950 animate-pulse shadow-[0_0_15px_rgba(245,158,11,0.5)]'
               : 'bg-cyan-500 hover:bg-cyan-400 text-slate-950 shadow-[0_0_15px_rgba(6,182,212,0.4)]'
           }`}
-          aria-label="Translate Selected Sign Gesture"
+          aria-label={t('interpret.startPractice')}
         >
           <Play className="w-4 h-4 fill-current" />
           <span>
             {demoStep === 'complete'
-              ? 'Replay Translation'
+              ? t('interpret.repeatAudio')
               : demoStep === 'speaking'
-              ? 'Speaking Output...'
-              : 'Translate Sign'}
+              ? t('interpret.statusSpeaking')
+              : t('interpret.startPractice')}
           </span>
         </button>
 
@@ -423,10 +405,10 @@ export function InterpretScreen() {
           id="btn-reset-guided-experience"
           onClick={resetGuidedExperience}
           className="h-12 rounded-2xl bg-slate-900 border border-white/10 hover:border-cyan-500/30 text-slate-300 hover:text-white font-medium text-xs flex items-center justify-center gap-2 transition-all active:scale-95 cursor-pointer"
-          aria-label="Reset Interpreter View"
+          aria-label="Reset"
         >
           <RotateCcw className="w-4 h-4 text-slate-400" />
-          <span>Reset View</span>
+          <span>Reset</span>
         </button>
       </div>
 
@@ -444,10 +426,10 @@ export function InterpretScreen() {
             </span>
             <div className="min-w-0">
               <p className="text-xs font-bold text-white truncate">
-                Scenario: {activePhrase.signConcept}
+                {t('interpret.signConceptLabel')}: {activePhrase.signConcept}
               </p>
               <p className="text-[10px] text-cyan-400 font-mono truncate">
-                Target Category: {activePhrase.category}
+                {activePhrase.category}
               </p>
             </div>
           </div>
@@ -459,7 +441,7 @@ export function InterpretScreen() {
               value={selectedLanguage}
               onChange={(e) => handleLanguageChange(e.target.value as SupportedLanguage)}
               className="bg-slate-950 border border-cyan-500/40 text-cyan-300 text-xs font-bold px-3 py-1.5 rounded-xl focus:outline-none focus:ring-2 focus:ring-cyan-400 cursor-pointer shadow-sm"
-              aria-label="Select Spoken Output Language"
+              aria-label="Language Selector"
             >
               {Object.values(SUPPORTED_LANGUAGES).map((l) => (
                 <option key={l.code} value={l.code} className="bg-slate-950 text-white">
@@ -478,7 +460,7 @@ export function InterpretScreen() {
         >
           <div className="flex items-center justify-between mb-1">
             <span className="text-[10px] font-mono uppercase tracking-wider text-cyan-400/80">
-              Spoken Interpretation Output [{currentLang.name}]
+              {t('interpret.realtimeCaptionLabel')} [{currentLang.name}]
             </span>
             <span className="text-[9px] font-mono text-slate-400 bg-slate-900 px-1.5 py-0.5 rounded">
               {currentLang.region}
@@ -513,13 +495,13 @@ export function InterpretScreen() {
           {/* Phonetic Pronunciation Guide */}
           {phoneticGuide && (
             <p className="text-[11px] font-mono text-cyan-300/80 mt-1 italic">
-              Pronunciation: {phoneticGuide}
+              {t('interpret.phoneticGuideLabel')}: {phoneticGuide}
             </p>
           )}
 
           {/* Physical NSL Sign Motion Instruction Guide */}
           <div className="mt-2.5 pt-2 border-t border-white/5 flex items-start gap-1.5 text-[11px] text-slate-300 leading-snug">
-            <span className="text-cyan-400 font-semibold shrink-0">NSL Sign Motion:</span>
+            <span className="text-cyan-400 font-semibold shrink-0">{t('interpret.movementLabel')}:</span>
             <span className="italic text-slate-400">{activePhrase.signDescription}</span>
           </div>
         </div>
@@ -549,7 +531,7 @@ export function InterpretScreen() {
                 id="btn-stop-speech"
                 onClick={stopActiveSpeech}
                 className="h-11 px-4 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-300 font-semibold text-xs flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer shadow-sm"
-                aria-label="Stop ongoing speech synthesis"
+                aria-label="Stop speech"
               >
                 <VolumeX className="w-4 h-4" />
                 <span>Stop</span>
@@ -559,10 +541,10 @@ export function InterpretScreen() {
                 id="btn-replay-speech"
                 onClick={replayVoice}
                 className="h-11 px-4 rounded-xl bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-cyan-300 font-bold text-xs flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer shadow-sm"
-                aria-label="Play or replay spoken interpretation aloud"
+                aria-label="Play audio"
               >
                 <Volume2 className="w-4 h-4 text-cyan-400" />
-                <span>{playbackState === 'finished' ? 'Replay' : 'Play Voice'}</span>
+                <span>{playbackState === 'finished' ? t('interpret.repeatAudio') : 'Play Voice'}</span>
               </button>
             )}
           </div>
@@ -579,7 +561,7 @@ export function InterpretScreen() {
         >
           <div className="flex items-center gap-1.5">
             <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-            <span>Select Sign Phrase ({DEMO_PHRASES.length} Available)</span>
+            <span>{t('interpret.selectPhrase')} ({DEMO_PHRASES.length})</span>
           </div>
           <ChevronDown
             className={`w-4 h-4 text-slate-400 transition-transform ${
@@ -637,7 +619,7 @@ export function InterpretScreen() {
           onClick={nextScenario}
           className="text-xs font-bold text-cyan-300 hover:text-cyan-200 flex items-center gap-1 cursor-pointer"
         >
-          <span>Next Phrase</span>
+          <span>{t('interpret.nextSign')}</span>
           <ArrowRight className="w-3.5 h-3.5" />
         </button>
       </div>

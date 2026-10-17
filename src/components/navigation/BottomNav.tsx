@@ -6,13 +6,13 @@ import { useApp } from '@/context/AppContext';
 import { AppTab } from '@/lib/types';
 
 export function BottomNav() {
-  const { activeTab, navigateToTab } = useApp();
+  const { activeTab, navigateToTab, t } = useApp();
 
   const tabs: { id: AppTab; label: string; icon: React.ElementType }[] = [
-    { id: 'home', label: 'Home', icon: Home },
-    { id: 'interpret', label: 'Interpret', icon: ScanFace },
-    { id: 'activity', label: 'Activity', icon: History },
-    { id: 'settings', label: 'Settings', icon: Settings2 },
+    { id: 'home', label: t('nav.home'), icon: Home },
+    { id: 'interpret', label: t('nav.interpret'), icon: ScanFace },
+    { id: 'activity', label: t('nav.activity'), icon: History },
+    { id: 'settings', label: t('nav.settings'), icon: Settings2 },
   ];
 
   return (
