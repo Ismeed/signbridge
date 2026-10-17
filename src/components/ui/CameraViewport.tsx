@@ -5,7 +5,6 @@ import {
   Camera,
   CameraOff,
   Sparkles,
-  RefreshCw,
   Eye,
   EyeOff,
   ShieldCheck,
@@ -45,7 +44,7 @@ export function CameraViewport({
     onPersonDetectRef.current = onPersonDetect;
   }, [onCameraToggle, onPersonDetect]);
 
-  // Camera stream state
+  // Camera stream state (strictly rear camera: 'environment')
   const [cameraActive, setCameraActive] = useState<boolean>(false);
   const cameraActiveRef = useRef<boolean>(false);
   useEffect(() => {
@@ -53,11 +52,6 @@ export function CameraViewport({
   }, [cameraActive]);
 
   const [cameraError, setCameraError] = useState<string | null>(null);
-  const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
-  const facingModeRef = useRef<'user' | 'environment'>('user');
-  useEffect(() => {
-    facingModeRef.current = facingMode;
-  }, [facingMode]);
 
   // Tracking HUD state & options
   const [showNeuralOverlays, setShowNeuralOverlays] = useState<boolean>(true);
@@ -150,8 +144,8 @@ export function CameraViewport({
     };
   }, []);
 
-  // Start Camera with user permission
-  const startCamera = async (targetFacing: 'user' | 'environment' = facingMode) => {
+  // Start Rear Camera only
+  const startRearCamera = async () => {
     setCameraError(null);
 
     if (
@@ -163,19 +157,19 @@ export function CameraViewport({
       return;
     }
 
-    // Stop existing stream if switching
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
     }
 
     try {
+      // Force rear-facing camera ('environment')
       const constraints: MediaStreamConstraints = {
         audio: false,
         video: {
-          facingMode: targetFacing,
-          width: { ideal: 640 },
-          height: { ideal: 480 },
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
         },
       };
 
@@ -198,15 +192,15 @@ export function CameraViewport({
         };
       }
     } catch (err: any) {
-      console.error('Camera stream error:', err);
+      console.error('Rear camera stream error:', err);
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
         setCameraError(
           'Camera access was denied. Please allow camera permissions in your browser bar.'
         );
       } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-        setCameraError('No video camera was detected on this device.');
+        setCameraError('No rear camera was detected on this device.');
       } else {
-        setCameraError('Could not start camera: ' + (err.message || 'Unknown error'));
+        setCameraError('Could not start rear camera: ' + (err.message || 'Unknown error'));
       }
       cameraActiveRef.current = false;
       setCameraActive(false);
@@ -218,19 +212,11 @@ export function CameraViewport({
     if (cameraActive) {
       stopCamera();
     } else {
-      startCamera(facingMode);
+      startRearCamera();
     }
   };
 
-  const switchFacingMode = () => {
-    const nextMode = facingMode === 'user' ? 'environment' : 'user';
-    setFacingMode(nextMode);
-    if (cameraActive) {
-      startCamera(nextMode);
-    }
-  };
-
-  // Continuous High-Speed 60FPS Vision & Render Loop
+  // Continuous High-Speed 60FPS Vision & Render Loop (unmirrored for rear camera)
   useEffect(() => {
     let active = true;
 
@@ -263,7 +249,7 @@ export function CameraViewport({
               }
             }
 
-            // Throttle React state updates to avoid unnecessary component renders
+            // Throttle React state telemetry updates
             if (time - lastTelemetryUpdateRef.current > 300) {
               lastTelemetryUpdateRef.current = time;
               setTelemetry({
@@ -277,13 +263,8 @@ export function CameraViewport({
             }
 
             if (showNeuralOverlaysRef.current) {
-              neuralVision.renderHUD(
-                ctx,
-                frame,
-                width,
-                height,
-                facingModeRef.current === 'user'
-              );
+              // mirror = false because this is the rear camera pointing out at the signer
+              neuralVision.renderHUD(ctx, frame, width, height, false);
             } else {
               ctx.clearRect(0, 0, width, height);
             }
@@ -322,8 +303,8 @@ export function CameraViewport({
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
           <span>
             {telemetry.isPersonTracked
-              ? `Person & Hands Locked (${telemetry.handsCount > 0 ? `${telemetry.handsCount} Hands` : 'Tracking'})`
-              : 'Scanning Viewport...'}
+              ? `Rear Camera: Signer Locked (${telemetry.handsCount > 0 ? `${telemetry.handsCount} Hands` : 'Tracking'})`
+              : 'Rear Camera: Scanning...'}
           </span>
         </Badge>
       );
@@ -333,7 +314,7 @@ export function CameraViewport({
       return (
         <Badge variant="cyan" size="sm">
           <Sparkles className="w-3 h-3 text-cyan-300 animate-pulse" />
-          <span>Neural Vision Simulation</span>
+          <span>Rear Camera Vision Simulation</span>
         </Badge>
       );
     }
@@ -341,7 +322,7 @@ export function CameraViewport({
     return (
       <Badge variant="slate" size="sm">
         <span className="w-1.5 h-1.5 rounded-full bg-slate-500" />
-        <span>Camera Standby</span>
+        <span>Rear Camera Standby</span>
       </Badge>
     );
   };
@@ -362,7 +343,7 @@ export function CameraViewport({
         }}
       />
 
-      {/* Actual Live Video Element */}
+      {/* Actual Live Video Element (Unmirrored for true rear camera orientation) */}
       <video
         ref={videoRef}
         autoPlay
@@ -370,7 +351,7 @@ export function CameraViewport({
         muted
         className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-300 ${
           cameraActive ? 'opacity-95' : 'opacity-0 pointer-events-none'
-        } ${facingMode === 'user' ? 'scale-x-[-1]' : ''}`}
+        }`}
       />
 
       {/* Real-Time Holographic Neural Canvas Overlay */}
@@ -405,14 +386,14 @@ export function CameraViewport({
             </svg>
           </div>
 
-          <p className="text-sm font-bold text-white">Neural Face & Hand Tracker</p>
+          <p className="text-sm font-bold text-white">Rear Camera Neural Tracker</p>
           <p className="text-xs text-slate-300 mt-1 max-w-[280px] leading-relaxed">
-            Click <strong className="text-cyan-300">Start Camera</strong> below to activate real-time 3D facial mesh, head rotation, and 21-joint hand skeletal tracking.
+            Position your rear camera facing the signer. Tap <strong className="text-cyan-300">Start Rear Camera</strong> to track face, head movement, and hands in real-time.
           </p>
 
           <div className="mt-3 flex items-center gap-1.5 text-[10px] text-cyan-300/80 bg-slate-900/80 px-2.5 py-1 rounded-full border border-cyan-500/20">
             <ShieldCheck className="w-3.5 h-3.5 text-cyan-400" />
-            <span>100% on-device WebGL GPU • Zero video leaves your device</span>
+            <span>Rear camera dedicated • 100% on-device WebGL processing</span>
           </div>
         </div>
       )}
@@ -421,11 +402,16 @@ export function CameraViewport({
       <div className="absolute top-3 inset-x-3 flex items-center justify-between z-20">
         <div className="flex items-center gap-1.5">{getStatusBadge()}</div>
 
-        <div className="flex items-center gap-1.5 bg-slate-950/85 backdrop-blur-md px-2 py-1 rounded-full border border-cyan-500/30 shadow-lg">
+        <div className="flex items-center gap-1.5 bg-slate-950/85 backdrop-blur-md px-2.5 py-1 rounded-full border border-cyan-500/30 shadow-lg">
+          {/* Rear Camera dedicated tag */}
+          <span className="text-[10px] font-mono text-cyan-300 uppercase tracking-wider font-semibold">
+            Rear Cam
+          </span>
+
           {/* Toggle landmark overlays */}
           <button
             onClick={() => setShowNeuralOverlays(!showNeuralOverlays)}
-            className="p-1.5 rounded-full text-slate-300 hover:text-cyan-300 transition-colors cursor-pointer"
+            className="p-1 rounded-full text-slate-300 hover:text-cyan-300 transition-colors cursor-pointer ml-1"
             title={showNeuralOverlays ? 'Hide Neural Tracking HUD' : 'Show Neural Tracking HUD'}
             aria-label="Toggle Neural Tracking HUD"
           >
@@ -434,19 +420,6 @@ export function CameraViewport({
             ) : (
               <EyeOff className="w-3.5 h-3.5 text-slate-500" />
             )}
-          </button>
-
-          {/* Flip camera (front / rear) */}
-          <button
-            onClick={switchFacingMode}
-            className="p-1.5 rounded-full text-slate-300 hover:text-cyan-300 transition-colors cursor-pointer flex items-center gap-1"
-            title={`Switch to ${facingMode === 'user' ? 'rear' : 'front'} camera`}
-            aria-label="Switch camera"
-          >
-            <RefreshCw className="w-3.5 h-3.5" />
-            <span className="text-[9px] font-mono uppercase text-slate-400 mr-0.5">
-              {facingMode === 'user' ? 'Front' : 'Rear'}
-            </span>
           </button>
         </div>
       </div>
@@ -458,9 +431,9 @@ export function CameraViewport({
           <span className="text-[11px] font-medium truncate">
             {cameraActive
               ? telemetry.isPersonTracked
-                ? `MediaPipe Active • ${telemetry.fps} FPS`
-                : 'Searching for Signer in Frame'
-              : 'MediaPipe Vision (WebGL Ready)'}
+                ? `Rear Sensor • ${telemetry.fps} FPS`
+                : 'Pointing Rear Camera at Signer'
+              : 'Rear Camera Standby'}
           </span>
         </div>
 
@@ -472,7 +445,7 @@ export function CameraViewport({
               ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40 hover:bg-rose-500/30'
               : 'bg-cyan-500 hover:bg-cyan-400 text-slate-950 shadow-[0_0_15px_rgba(6,182,212,0.4)]'
           }`}
-          aria-label={cameraActive ? 'Turn off live camera' : 'Start live camera'}
+          aria-label={cameraActive ? 'Turn off rear camera' : 'Start rear camera'}
         >
           {cameraActive ? (
             <>
@@ -482,7 +455,7 @@ export function CameraViewport({
           ) : (
             <>
               <Camera className="w-3.5 h-3.5 fill-current" />
-              <span>Start Camera</span>
+              <span>Start Rear Camera</span>
             </>
           )}
         </button>
@@ -493,7 +466,7 @@ export function CameraViewport({
         <div className="absolute top-13 inset-x-3 p-3 rounded-2xl bg-rose-950/95 border border-rose-500/50 text-rose-100 text-xs z-30 shadow-xl backdrop-blur-md space-y-1.5">
           <div className="flex items-center gap-1.5 font-bold text-rose-300">
             <AlertTriangle className="w-4 h-4 shrink-0" />
-            <span>Camera Notice</span>
+            <span>Rear Camera Notice</span>
           </div>
           <p className="text-[11px] leading-relaxed text-rose-200">{cameraError}</p>
           <button
