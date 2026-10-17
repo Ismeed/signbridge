@@ -176,6 +176,8 @@ class NeuralVisionService {
     return this.isLoaded && (this.poseLandmarker !== null || this.handLandmarker !== null);
   }
 
+  private lastInferenceTimestamp = 0;
+
   /**
    * Process a single video frame and extract head, face, and hand landmarks
    */
@@ -205,14 +207,23 @@ class NeuralVisionService {
       fps: this.currentFps || 60,
     };
 
-    if (!this.isReady() || video.readyState < 2) {
+    if (
+      !this.isReady() ||
+      video.readyState < 2 ||
+      video.videoWidth === 0 ||
+      video.videoHeight === 0
+    ) {
       return frameResult;
     }
+
+    // MediaPipe requires strictly monotonically increasing timestamps
+    const safeTimestamp = Math.max(timestamp, this.lastInferenceTimestamp + 1);
+    this.lastInferenceTimestamp = safeTimestamp;
 
     try {
       // 1. Process Pose (Face + Upper Body)
       if (this.poseLandmarker) {
-        const poseResult = this.poseLandmarker.detectForVideo(video, timestamp);
+        const poseResult = this.poseLandmarker.detectForVideo(video, safeTimestamp);
         if (poseResult?.landmarks?.length > 0) {
           const landmarks = poseResult.landmarks[0];
           frameResult.poseLandmarks = landmarks;
@@ -264,7 +275,7 @@ class NeuralVisionService {
 
       // 2. Process High-Precision Hands (21 3D joints per hand)
       if (this.handLandmarker) {
-        const handResult = this.handLandmarker.detectForVideo(video, timestamp);
+        const handResult = this.handLandmarker.detectForVideo(video, safeTimestamp);
         if (handResult?.landmarks?.length > 0) {
           frameResult.isSigningActive = true;
 

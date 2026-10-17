@@ -9,13 +9,7 @@ import {
   Eye,
   EyeOff,
   ShieldCheck,
-  UserCheck,
-  UserX,
-  Loader2,
   AlertTriangle,
-  Info,
-  Maximize2,
-  Minimize2,
   Cpu,
 } from 'lucide-react';
 import { InterpretationState } from '@/lib/types';
@@ -41,19 +35,38 @@ export function CameraViewport({
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animFrameRef = useRef<number | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  // Stable callback refs to prevent unnecessary re-renders
+  const onCameraToggleRef = useRef(onCameraToggle);
+  const onPersonDetectRef = useRef(onPersonDetect);
+  useEffect(() => {
+    onCameraToggleRef.current = onCameraToggle;
+    onPersonDetectRef.current = onPersonDetect;
+  }, [onCameraToggle, onPersonDetect]);
 
   // Camera stream state
   const [cameraActive, setCameraActive] = useState<boolean>(false);
-  const [cameraError, setCameraError] = useState<string | null>(null);
-  const [cameraErrorType, setCameraErrorType] = useState<
-    'permission' | 'unavailable' | 'in_use' | 'security' | 'generic' | null
-  >(null);
-  const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
+  const cameraActiveRef = useRef<boolean>(false);
+  useEffect(() => {
+    cameraActiveRef.current = cameraActive;
+  }, [cameraActive]);
 
-  // Neural tracking state
-  const [isVisionModelReady, setIsVisionModelReady] = useState<boolean>(false);
-  const [modelLoading, setModelLoading] = useState<boolean>(false);
-  const [trackingTelemetry, setTrackingTelemetry] = useState<{
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
+  const facingModeRef = useRef<'user' | 'environment'>('user');
+  useEffect(() => {
+    facingModeRef.current = facingMode;
+  }, [facingMode]);
+
+  // Tracking HUD state & options
+  const [showNeuralOverlays, setShowNeuralOverlays] = useState<boolean>(true);
+  const showNeuralOverlaysRef = useRef<boolean>(true);
+  useEffect(() => {
+    showNeuralOverlaysRef.current = showNeuralOverlays;
+  }, [showNeuralOverlays]);
+
+  const [telemetry, setTelemetry] = useState<{
     isPersonTracked: boolean;
     isSigningActive: boolean;
     headTilt: number;
@@ -67,14 +80,18 @@ export function CameraViewport({
     handsCount: 0,
   });
 
-  // UI display toggles
-  const [showNeuralOverlays, setShowNeuralOverlays] = useState<boolean>(true);
+  const lastTelemetryUpdateRef = useRef<number>(0);
+  const lastPersonTrackedRef = useRef<boolean>(false);
 
   // Dimensions
   const [dimensions, setDimensions] = useState<{ width: number; height: number }>({
     width: 0,
     height: 0,
   });
+  const dimensionsRef = useRef<{ width: number; height: number }>({ width: 0, height: 0 });
+  useEffect(() => {
+    dimensionsRef.current = dimensions;
+  }, [dimensions]);
 
   // Observe container dimensions for canvas matching
   useEffect(() => {
@@ -83,7 +100,13 @@ export function CameraViewport({
       for (const entry of entries) {
         const { width, height } = entry.contentRect;
         if (width > 0 && height > 0) {
-          setDimensions({ width: Math.round(width), height: Math.round(height) });
+          const w = Math.round(width);
+          const h = Math.round(height);
+          setDimensions({ width: w, height: h });
+          if (canvasRef.current) {
+            canvasRef.current.width = w;
+            canvasRef.current.height = h;
+          }
         }
       }
     });
@@ -91,128 +114,45 @@ export function CameraViewport({
     return () => observer.disconnect();
   }, []);
 
-  // Sync canvas width/height to container
-  useEffect(() => {
-    if (canvasRef.current && dimensions.width > 0 && dimensions.height > 0) {
-      canvasRef.current.width = dimensions.width;
-      canvasRef.current.height = dimensions.height;
-    }
-  }, [dimensions]);
-
   // Pre-initialize neural vision engine on mount
   useEffect(() => {
-    setModelLoading(true);
-    neuralVision
-      .init()
-      .then((ready) => {
-        setIsVisionModelReady(ready);
-        setModelLoading(false);
-      })
-      .catch(() => {
-        setModelLoading(false);
-      });
+    neuralVision.init().catch((err) => {
+      console.warn('Neural vision engine init notice:', err);
+    });
   }, []);
 
-  // Stop camera tracks cleanly
-  const stopCameraStream = useCallback(() => {
-    if (videoRef.current && videoRef.current.srcObject) {
-      const stream = videoRef.current.srcObject as MediaStream;
-      stream.getTracks().forEach((track) => track.stop());
+  // Explicit stop camera function
+  const stopCamera = useCallback(() => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
+    cameraActiveRef.current = false;
     setCameraActive(false);
-    if (onCameraToggle) onCameraToggle(false);
-    if (onPersonDetect) onPersonDetect(false);
-  }, [onCameraToggle, onPersonDetect]);
+    if (onCameraToggleRef.current) onCameraToggleRef.current(false);
+    if (onPersonDetectRef.current) onPersonDetectRef.current(false);
+  }, []);
 
-  // Teardown camera on component unmount
+  // Cleanup ONLY on true component unmount
   useEffect(() => {
     return () => {
       if (animFrameRef.current !== null) {
         cancelAnimationFrame(animFrameRef.current);
         animFrameRef.current = null;
       }
-      stopCameraStream();
-    };
-  }, [stopCameraStream]);
-
-  // Main Real-Time Tracking & Rendering Loop
-  const runVisionRenderLoop = useCallback(() => {
-    const canvas = canvasRef.current;
-    const video = videoRef.current;
-
-    if (canvas && dimensions.width > 0 && dimensions.height > 0) {
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        let frame: TrackingFrame;
-
-        if (cameraActive && video && video.readyState >= 2 && !video.paused && !video.ended) {
-          // 1. Live camera frame inference
-          frame = neuralVision.processVideoFrame(video, performance.now());
-
-          if (frame.isPersonTracked !== trackingTelemetry.isPersonTracked) {
-            if (onPersonDetect) onPersonDetect(frame.isPersonTracked);
-          }
-
-          setTrackingTelemetry({
-            isPersonTracked: frame.isPersonTracked,
-            isSigningActive: frame.isSigningActive,
-            headTilt: frame.headTiltAngle,
-            fps: frame.fps,
-            handsCount: (frame.leftHandLandmarks ? 1 : 0) + (frame.rightHandLandmarks ? 1 : 0),
-          });
-
-          if (showNeuralOverlays) {
-            neuralVision.renderHUD(
-              ctx,
-              frame,
-              dimensions.width,
-              dimensions.height,
-              facingMode === 'user'
-            );
-          } else {
-            ctx.clearRect(0, 0, dimensions.width, dimensions.height);
-          }
-        } else if (isSimulatedDemo || !cameraActive) {
-          // 2. High-Fidelity Simulation Mode for Demo / Tour
-          frame = neuralVision.generateSimulatedFrame(performance.now());
-          if (showNeuralOverlays) {
-            neuralVision.renderHUD(ctx, frame, dimensions.width, dimensions.height, false);
-          } else {
-            ctx.clearRect(0, 0, dimensions.width, dimensions.height);
-          }
-        } else {
-          ctx.clearRect(0, 0, dimensions.width, dimensions.height);
-        }
-      }
-    }
-
-    animFrameRef.current = requestAnimationFrame(runVisionRenderLoop);
-  }, [
-    cameraActive,
-    dimensions,
-    facingMode,
-    isSimulatedDemo,
-    showNeuralOverlays,
-    onPersonDetect,
-    trackingTelemetry.isPersonTracked,
-  ]);
-
-  // Start / restart tracking loop
-  useEffect(() => {
-    animFrameRef.current = requestAnimationFrame(runVisionRenderLoop);
-    return () => {
-      if (animFrameRef.current !== null) {
-        cancelAnimationFrame(animFrameRef.current);
-        animFrameRef.current = null;
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
       }
     };
-  }, [runVisionRenderLoop]);
+  }, []);
 
   // Start Camera with user permission
   const startCamera = async (targetFacing: 'user' | 'environment' = facingMode) => {
     setCameraError(null);
-    setCameraErrorType(null);
 
     if (
       typeof navigator === 'undefined' ||
@@ -220,11 +160,14 @@ export function CameraViewport({
       !navigator.mediaDevices.getUserMedia
     ) {
       setCameraError('Camera access requires HTTPS or localhost in your browser.');
-      setCameraErrorType('security');
       return;
     }
 
-    stopCameraStream();
+    // Stop existing stream if switching
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
 
     try {
       const constraints: MediaStreamConstraints = {
@@ -237,44 +180,43 @@ export function CameraViewport({
       };
 
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      streamRef.current = stream;
 
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.onloadedmetadata = () => {
-          if (videoRef.current) {
-            videoRef.current
-              .play()
-              .then(() => {
-                setCameraActive(true);
-                if (onCameraToggle) onCameraToggle(true);
-              })
-              .catch((err) => {
-                setCameraError('Failed to start video playback: ' + err.message);
-              });
+      const video = videoRef.current;
+      if (video) {
+        video.srcObject = stream;
+        video.onloadedmetadata = async () => {
+          try {
+            await video.play();
+            cameraActiveRef.current = true;
+            setCameraActive(true);
+            if (onCameraToggleRef.current) onCameraToggleRef.current(true);
+          } catch (playErr: any) {
+            console.error('Video play error:', playErr);
+            setCameraError('Failed to start video playback: ' + playErr.message);
           }
         };
       }
     } catch (err: any) {
+      console.error('Camera stream error:', err);
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
         setCameraError(
           'Camera access was denied. Please allow camera permissions in your browser bar.'
         );
-        setCameraErrorType('permission');
       } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
         setCameraError('No video camera was detected on this device.');
-        setCameraErrorType('unavailable');
       } else {
         setCameraError('Could not start camera: ' + (err.message || 'Unknown error'));
-        setCameraErrorType('generic');
       }
+      cameraActiveRef.current = false;
       setCameraActive(false);
-      if (onCameraToggle) onCameraToggle(false);
+      if (onCameraToggleRef.current) onCameraToggleRef.current(false);
     }
   };
 
   const toggleCamera = () => {
     if (cameraActive) {
-      stopCameraStream();
+      stopCamera();
     } else {
       startCamera(facingMode);
     }
@@ -288,14 +230,99 @@ export function CameraViewport({
     }
   };
 
+  // Continuous High-Speed 60FPS Vision & Render Loop
+  useEffect(() => {
+    let active = true;
+
+    const renderLoop = (time: number) => {
+      if (!active) return;
+
+      const canvas = canvasRef.current;
+      const video = videoRef.current;
+      const { width, height } = dimensionsRef.current;
+
+      if (canvas && width > 0 && height > 0) {
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          let frame: TrackingFrame;
+
+          if (
+            cameraActiveRef.current &&
+            video &&
+            video.readyState >= 2 &&
+            !video.paused &&
+            !video.ended
+          ) {
+            // Live camera inference
+            frame = neuralVision.processVideoFrame(video, time);
+
+            if (frame.isPersonTracked !== lastPersonTrackedRef.current) {
+              lastPersonTrackedRef.current = frame.isPersonTracked;
+              if (onPersonDetectRef.current) {
+                onPersonDetectRef.current(frame.isPersonTracked);
+              }
+            }
+
+            // Throttle React state updates to avoid unnecessary component renders
+            if (time - lastTelemetryUpdateRef.current > 300) {
+              lastTelemetryUpdateRef.current = time;
+              setTelemetry({
+                isPersonTracked: frame.isPersonTracked,
+                isSigningActive: frame.isSigningActive,
+                headTilt: frame.headTiltAngle,
+                fps: frame.fps,
+                handsCount:
+                  (frame.leftHandLandmarks ? 1 : 0) + (frame.rightHandLandmarks ? 1 : 0),
+              });
+            }
+
+            if (showNeuralOverlaysRef.current) {
+              neuralVision.renderHUD(
+                ctx,
+                frame,
+                width,
+                height,
+                facingModeRef.current === 'user'
+              );
+            } else {
+              ctx.clearRect(0, 0, width, height);
+            }
+          } else if (isSimulatedDemo || !cameraActiveRef.current) {
+            // Organic simulation for demo mode or standby
+            frame = neuralVision.generateSimulatedFrame(time);
+            if (showNeuralOverlaysRef.current) {
+              neuralVision.renderHUD(ctx, frame, width, height, false);
+            } else {
+              ctx.clearRect(0, 0, width, height);
+            }
+          } else {
+            ctx.clearRect(0, 0, width, height);
+          }
+        }
+      }
+
+      animFrameRef.current = requestAnimationFrame(renderLoop);
+    };
+
+    animFrameRef.current = requestAnimationFrame(renderLoop);
+
+    return () => {
+      active = false;
+      if (animFrameRef.current !== null) {
+        cancelAnimationFrame(animFrameRef.current);
+        animFrameRef.current = null;
+      }
+    };
+  }, [isSimulatedDemo]);
+
   const getStatusBadge = () => {
     if (cameraActive) {
       return (
-        <Badge variant={trackingTelemetry.isPersonTracked ? 'emerald' : 'cyan'} size="sm">
+        <Badge variant={telemetry.isPersonTracked ? 'emerald' : 'cyan'} size="sm">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
           <span>
-            {trackingTelemetry.isPersonTracked
-              ? `Person & Hands Locked (${trackingTelemetry.handsCount > 0 ? `${trackingTelemetry.handsCount} Hands` : 'Tracking'})`
+            {telemetry.isPersonTracked
+              ? `Person & Hands Locked (${telemetry.handsCount > 0 ? `${telemetry.handsCount} Hands` : 'Tracking'})`
               : 'Scanning Viewport...'}
           </span>
         </Badge>
@@ -338,6 +365,7 @@ export function CameraViewport({
       {/* Actual Live Video Element */}
       <video
         ref={videoRef}
+        autoPlay
         playsInline
         muted
         className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-300 ${
@@ -429,8 +457,8 @@ export function CameraViewport({
           <Cpu className="w-3.5 h-3.5 text-cyan-400 shrink-0 animate-pulse" />
           <span className="text-[11px] font-medium truncate">
             {cameraActive
-              ? trackingTelemetry.isPersonTracked
-                ? `MediaPipe Active • ${trackingTelemetry.fps} FPS`
+              ? telemetry.isPersonTracked
+                ? `MediaPipe Active • ${telemetry.fps} FPS`
                 : 'Searching for Signer in Frame'
               : 'MediaPipe Vision (WebGL Ready)'}
           </span>

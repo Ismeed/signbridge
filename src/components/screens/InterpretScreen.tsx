@@ -70,6 +70,14 @@ export function InterpretScreen() {
   const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
   const [isPersonDetected, setIsPersonDetected] = useState<boolean>(false);
 
+  const handleCameraToggle = useCallback((active: boolean) => {
+    setIsCameraActive(active);
+  }, []);
+
+  const handlePersonDetect = useCallback((detected: boolean) => {
+    setIsPersonDetected(detected);
+  }, []);
+
   // Timers ref for clean teardown
   const sequenceTimerRef = useRef<NodeJS.Timeout | null>(null);
   const captionTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -340,8 +348,8 @@ export function InterpretScreen() {
       <CameraViewport
         state={getCameraViewportState()}
         isSimulatedDemo={demoStep !== 'ready'}
-        onCameraToggle={(active) => setIsCameraActive(active)}
-        onPersonDetect={(detected) => setIsPersonDetected(detected)}
+        onCameraToggle={handleCameraToggle}
+        onPersonDetect={handlePersonDetect}
       />
 
       {/* Step Progress Tracker Bar */}
