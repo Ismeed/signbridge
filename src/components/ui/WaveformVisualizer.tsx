@@ -1,12 +1,13 @@
 'use client';
 
 import React from 'react';
+import clsx from 'clsx';
 import { PlaybackState } from '@/lib/speech';
 import { Volume2, VolumeX, Check, AlertCircle } from 'lucide-react';
 
 interface WaveformVisualizerProps {
   playbackState?: PlaybackState;
-  isPlaying?: boolean; // backwards compatibility
+  isPlaying?: boolean;
   reducedMotion?: boolean;
   className?: string;
   barsCount?: number;
@@ -16,55 +17,49 @@ export function WaveformVisualizer({
   playbackState,
   isPlaying,
   reducedMotion = false,
-  className = '',
-  barsCount = 12,
+  className,
+  barsCount = 10,
 }: WaveformVisualizerProps) {
-  // Determine canonical playback state
-  const state: PlaybackState =
-    playbackState || (isPlaying ? 'speaking' : 'ready');
-
+  const state: PlaybackState = playbackState || (isPlaying ? 'speaking' : 'ready');
   const isSpeaking = state === 'speaking';
+  const staticHeights = [30, 55, 80, 45, 95, 65, 40, 85, 50, 75];
 
-  // Base bar pattern for an organic sound curve
-  const staticHeights = [25, 45, 75, 35, 95, 60, 40, 85, 55, 90, 30, 70];
-
-  const getStatusBadge = () => {
+  const getStatusIndicator = () => {
     switch (state) {
       case 'speaking':
         return (
-          <div className="flex items-center gap-1.5 text-cyan-300 font-mono text-[10px]">
-            <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-ping" />
-            <Volume2 className="w-3 h-3 text-cyan-400" />
+          <div className="flex items-center gap-1.5 text-cyan-300 text-[11px] font-medium">
+            <Volume2 className="w-3.5 h-3.5 text-cyan-400" />
             <span>Speaking</span>
           </div>
         );
       case 'finished':
         return (
-          <div className="flex items-center gap-1.5 text-emerald-400 font-mono text-[10px]">
-            <Check className="w-3 h-3" />
-            <span>Finished</span>
+          <div className="flex items-center gap-1.5 text-emerald-400 text-[11px] font-medium">
+            <Check className="w-3.5 h-3.5" />
+            <span>Played</span>
           </div>
         );
       case 'unavailable':
         return (
-          <div className="flex items-center gap-1.5 text-amber-400 font-mono text-[10px]">
-            <VolumeX className="w-3 h-3" />
-            <span>Audio Unavailable</span>
+          <div className="flex items-center gap-1.5 text-amber-400 text-[11px] font-medium">
+            <VolumeX className="w-3.5 h-3.5" />
+            <span>Unavailable</span>
           </div>
         );
       case 'error':
         return (
-          <div className="flex items-center gap-1.5 text-rose-400 font-mono text-[10px]">
-            <AlertCircle className="w-3 h-3" />
-            <span>Synthesis Error</span>
+          <div className="flex items-center gap-1.5 text-rose-400 text-[11px] font-medium">
+            <AlertCircle className="w-3.5 h-3.5" />
+            <span>Error</span>
           </div>
         );
       case 'ready':
       default:
         return (
-          <div className="flex items-center gap-1.5 text-slate-400 font-mono text-[10px]">
-            <span className="w-1.5 h-1.5 rounded-full bg-slate-500" />
-            <span>Audio Ready</span>
+          <div className="flex items-center gap-1.5 text-slate-400 text-[11px] font-medium">
+            <Volume2 className="w-3.5 h-3.5 text-slate-500" />
+            <span>Audio</span>
           </div>
         );
     }
@@ -72,18 +67,16 @@ export function WaveformVisualizer({
 
   return (
     <div
-      className={`flex items-center justify-between gap-3 h-11 px-3 py-1.5 rounded-2xl bg-slate-950/70 border border-cyan-500/20 backdrop-blur-md select-none ${className}`}
+      className={clsx(
+        'flex items-center justify-between gap-2 h-10 px-3 rounded-xl bg-slate-950/60 border border-white/[0.06] select-none',
+        className
+      )}
       aria-label={`Audio waveform status: ${state}`}
       role="region"
     >
-      {/* Real-time Status Indicator */}
-      <div className="shrink-0">{getStatusBadge()}</div>
+      <div className="shrink-0">{getStatusIndicator()}</div>
 
-      {/* Dynamic Soundwave Bars */}
-      <div
-        className="flex items-center gap-1 h-full flex-1 justify-end max-w-[140px]"
-        aria-hidden="true"
-      >
+      <div className="flex items-center gap-1 h-full flex-1 justify-end max-w-[110px]" aria-hidden="true">
         {Array.from({ length: barsCount }).map((_, i) => {
           const heightPercent = staticHeights[i % staticHeights.length];
           const delay = (i * 0.07).toFixed(2);
@@ -96,18 +89,14 @@ export function WaveformVisualizer({
               style={{
                 height: isSpeaking
                   ? reducedMotion
-                    ? `${heightPercent * 0.8}%`
+                    ? `${heightPercent * 0.7}%`
                     : undefined
-                  : `${Math.max(15, heightPercent * 0.3)}%`,
+                  : `${Math.max(18, heightPercent * 0.28)}%`,
                 backgroundColor: isSpeaking
-                  ? '#00f2fe'
+                  ? '#22d3ee'
                   : state === 'finished'
                   ? '#10b981'
                   : '#334155',
-                boxShadow:
-                  isSpeaking && !reducedMotion
-                    ? '0 0 8px rgba(0, 242, 254, 0.7)'
-                    : 'none',
                 animation:
                   isSpeaking && !reducedMotion
                     ? `wave-bar ${duration}s ease-in-out infinite ${delay}s`

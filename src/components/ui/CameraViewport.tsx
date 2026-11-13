@@ -1,19 +1,16 @@
 'use client';
 
 import React, { useRef, useState, useEffect, useCallback } from 'react';
+import clsx from 'clsx';
 import {
   Camera,
   CameraOff,
-  Sparkles,
   RefreshCw,
   Eye,
   EyeOff,
-  ShieldCheck,
   AlertTriangle,
-  Cpu,
 } from 'lucide-react';
 import { InterpretationState } from '@/lib/types';
-import { Badge } from './Badge';
 import { neuralVision, TrackingFrame } from '@/lib/neuralVision';
 import { useApp } from '@/context/AppContext';
 
@@ -25,19 +22,17 @@ interface CameraViewportProps {
 }
 
 export function CameraViewport({
-  state,
   onCameraToggle,
   onPersonDetect,
   isSimulatedDemo = false,
 }: CameraViewportProps) {
-  const { preferences, t } = useApp();
+  const { t } = useApp();
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animFrameRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
-  // Stable callback refs to prevent unnecessary re-renders
   const onCameraToggleRef = useRef(onCameraToggle);
   const onPersonDetectRef = useRef(onPersonDetect);
   useEffect(() => {
@@ -45,7 +40,6 @@ export function CameraViewport({
     onPersonDetectRef.current = onPersonDetect;
   }, [onCameraToggle, onPersonDetect]);
 
-  // Camera stream state (supports both 'user' and 'environment')
   const [cameraActive, setCameraActive] = useState<boolean>(false);
   const cameraActiveRef = useRef<boolean>(false);
   useEffect(() => {
@@ -59,8 +53,6 @@ export function CameraViewport({
   }, [facingMode]);
 
   const [cameraError, setCameraError] = useState<string | null>(null);
-
-  // Tracking HUD state & options
   const [showNeuralOverlays, setShowNeuralOverlays] = useState<boolean>(true);
   const showNeuralOverlaysRef = useRef<boolean>(true);
   useEffect(() => {
@@ -69,14 +61,10 @@ export function CameraViewport({
 
   const [telemetry, setTelemetry] = useState<{
     isPersonTracked: boolean;
-    isSigningActive: boolean;
-    headTilt: number;
     fps: number;
     handsCount: number;
   }>({
     isPersonTracked: false,
-    isSigningActive: false,
-    headTilt: 0,
     fps: 60,
     handsCount: 0,
   });
@@ -84,7 +72,6 @@ export function CameraViewport({
   const lastTelemetryUpdateRef = useRef<number>(0);
   const lastPersonTrackedRef = useRef<boolean>(false);
 
-  // Dimensions
   const [dimensions, setDimensions] = useState<{ width: number; height: number }>({
     width: 0,
     height: 0,
@@ -94,7 +81,7 @@ export function CameraViewport({
     dimensionsRef.current = dimensions;
   }, [dimensions]);
 
-  // Observe container dimensions for canvas matching
+  // Match canvas resolution to container dimensions
   useEffect(() => {
     if (!containerRef.current) return;
     const observer = new ResizeObserver((entries) => {
@@ -115,14 +102,13 @@ export function CameraViewport({
     return () => observer.disconnect();
   }, []);
 
-  // Pre-initialize neural vision engine on mount
+  // Pre-initialize neural vision engine
   useEffect(() => {
     neuralVision.init().catch((err) => {
       console.warn('Neural vision engine init notice:', err);
     });
   }, []);
 
-  // Explicit stop camera function
   const stopCamera = useCallback(() => {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
@@ -137,7 +123,7 @@ export function CameraViewport({
     if (onPersonDetectRef.current) onPersonDetectRef.current(false);
   }, []);
 
-  // Cleanup ONLY on true component unmount
+  // Clean up hardware stream on unmount
   useEffect(() => {
     return () => {
       if (animFrameRef.current !== null) {
@@ -151,7 +137,6 @@ export function CameraViewport({
     };
   }, []);
 
-  // Start Camera with specified facing mode ('user' or 'environment')
   const startCamera = async (targetFacing: 'user' | 'environment' = facingMode) => {
     setCameraError(null);
 
@@ -160,7 +145,7 @@ export function CameraViewport({
       !navigator.mediaDevices ||
       !navigator.mediaDevices.getUserMedia
     ) {
-      setCameraError('Camera access requires HTTPS or localhost in your browser.');
+      setCameraError('Camera access requires HTTPS or localhost.');
       return;
     }
 
@@ -191,22 +176,20 @@ export function CameraViewport({
             cameraActiveRef.current = true;
             setCameraActive(true);
             if (onCameraToggleRef.current) onCameraToggleRef.current(true);
-          } catch (playErr: any) {
-            console.error('Video play error:', playErr);
-            setCameraError('Failed to start video playback: ' + playErr.message);
+          } catch (playErr: unknown) {
+            const msg = playErr instanceof Error ? playErr.message : 'Playback error';
+            setCameraError('Failed to start video: ' + msg);
           }
         };
       }
-    } catch (err: any) {
-      console.error('Camera stream error:', err);
-      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        setCameraError(
-          'Camera access was denied. Please allow camera permissions in your browser bar.'
-        );
-      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-        setCameraError(`No ${targetFacing === 'user' ? 'front' : 'rear'} camera was detected on this device.`);
+    } catch (err: unknown) {
+      const errorObj = err as { name?: string; message?: string };
+      if (errorObj.name === 'NotAllowedError' || errorObj.name === 'PermissionDeniedError') {
+        setCameraError('Camera permission denied. Allow access in browser settings.');
+      } else if (errorObj.name === 'NotFoundError' || errorObj.name === 'DevicesNotFoundError') {
+        setCameraError(`No ${targetFacing === 'user' ? 'front' : 'rear'} camera found.`);
       } else {
-        setCameraError('Could not start camera: ' + (err.message || 'Unknown error'));
+        setCameraError('Could not start camera: ' + (errorObj.message || 'Unknown error'));
       }
       cameraActiveRef.current = false;
       setCameraActive(false);
@@ -230,7 +213,7 @@ export function CameraViewport({
     }
   };
 
-  // Continuous High-Speed 60FPS Vision & Render Loop
+  // Continuous render & vision tracking loop
   useEffect(() => {
     let active = true;
 
@@ -253,7 +236,6 @@ export function CameraViewport({
             !video.paused &&
             !video.ended
           ) {
-            // Live camera inference
             frame = neuralVision.processVideoFrame(video, time);
 
             if (frame.isPersonTracked !== lastPersonTrackedRef.current) {
@@ -263,13 +245,10 @@ export function CameraViewport({
               }
             }
 
-            // Throttle React state telemetry updates
             if (time - lastTelemetryUpdateRef.current > 300) {
               lastTelemetryUpdateRef.current = time;
               setTelemetry({
                 isPersonTracked: frame.isPersonTracked,
-                isSigningActive: frame.isSigningActive,
-                headTilt: frame.headTiltAngle,
                 fps: frame.fps,
                 handsCount:
                   (frame.leftHandLandmarks ? 1 : 0) + (frame.rightHandLandmarks ? 1 : 0),
@@ -277,14 +256,12 @@ export function CameraViewport({
             }
 
             if (showNeuralOverlaysRef.current) {
-              // Mirror canvas HUD only when using front/selfie camera ('user')
               const isFrontCamera = facingModeRef.current === 'user';
               neuralVision.renderHUD(ctx, frame, width, height, isFrontCamera);
             } else {
               ctx.clearRect(0, 0, width, height);
             }
-          } else if (isSimulatedDemo || !cameraActiveRef.current) {
-            // Organic simulation for demo mode or standby
+          } else if (isSimulatedDemo) {
             frame = neuralVision.generateSimulatedFrame(time);
             if (showNeuralOverlaysRef.current) {
               neuralVision.renderHUD(ctx, frame, width, height, false);
@@ -311,133 +288,83 @@ export function CameraViewport({
     };
   }, [isSimulatedDemo]);
 
-  const getStatusBadge = () => {
-    const cameraLabel = facingMode === 'user' ? 'Front' : 'Rear';
+  const statusDotClass = cameraActive
+    ? telemetry.isPersonTracked
+      ? 'bg-emerald-400'
+      : 'bg-cyan-400 animate-pulse'
+    : isSimulatedDemo
+    ? 'bg-cyan-400 animate-pulse'
+    : 'bg-slate-500';
 
-    if (cameraActive) {
-      return (
-        <Badge variant={telemetry.isPersonTracked ? 'emerald' : 'cyan'} size="sm">
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-          <span>
-            {telemetry.isPersonTracked
-              ? `${cameraLabel}: Signer Locked (${telemetry.handsCount > 0 ? `${telemetry.handsCount} Hands` : 'Tracking'})`
-              : `${cameraLabel}: Scanning...`}
-          </span>
-        </Badge>
-      );
-    }
-
-    if (isSimulatedDemo) {
-      return (
-        <Badge variant="cyan" size="sm">
-          <Sparkles className="w-3 h-3 text-cyan-300 animate-pulse" />
-          <span>Vision Simulation</span>
-        </Badge>
-      );
-    }
-
-    return (
-      <Badge variant="slate" size="sm">
-        <span className="w-1.5 h-1.5 rounded-full bg-slate-500" />
-        <span>{cameraLabel} Standby</span>
-      </Badge>
-    );
-  };
+  const statusLabel = cameraActive
+    ? telemetry.isPersonTracked
+      ? telemetry.handsCount > 0
+        ? `${t('interpret.locked')} • ${telemetry.handsCount}H`
+        : t('interpret.locked')
+      : t('interpret.scanning')
+    : isSimulatedDemo
+    ? t('interpret.demo')
+    : t('interpret.standby');
 
   return (
     <div
       ref={containerRef}
-      className="relative w-full aspect-[4/5] sm:aspect-[4/3] rounded-3xl overflow-hidden border-2 border-cyan-500/30 bg-[#070e1e] shadow-2xl transition-all"
+      className="relative w-full aspect-[4/3] rounded-3xl overflow-hidden border border-white/10 bg-[#0a101d] shadow-xl app-card-surface"
     >
-      {/* Background Matrix Grid */}
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_40%,rgba(6,182,212,0.18),transparent_70%)] pointer-events-none" />
-      <div
-        className="absolute inset-0 opacity-15 pointer-events-none"
-        style={{
-          backgroundImage:
-            'linear-gradient(rgba(56, 189, 248, 0.25) 1px, transparent 1px), linear-gradient(90deg, rgba(56, 189, 248, 0.25) 1px, transparent 1px)',
-          backgroundSize: '32px 32px',
-        }}
-      />
+      {/* Subtle Ambient Background */}
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_40%,rgba(6,182,212,0.12),transparent_70%)] pointer-events-none" />
 
-      {/* Actual Live Video Element (Mirrored only when in front selfie camera mode) */}
+      {/* Live Video Stream */}
       <video
         ref={videoRef}
         autoPlay
         playsInline
         muted
-        className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-300 ${
-          cameraActive ? 'opacity-95' : 'opacity-0 pointer-events-none'
-        } ${facingMode === 'user' ? 'scale-x-[-1]' : ''}`}
+        className={clsx(
+          'absolute inset-0 w-full h-full object-cover transition-opacity duration-300',
+          cameraActive ? 'opacity-100' : 'opacity-0 pointer-events-none',
+          facingMode === 'user' && 'scale-x-[-1]'
+        )}
       />
 
-      {/* Real-Time Holographic Neural Canvas Overlay */}
+      {/* Landmark Canvas Overlay */}
       <canvas
         ref={canvasRef}
         className="absolute inset-0 w-full h-full pointer-events-none z-10"
       />
 
-      {/* Dormant Camera Visualizer with Technical Explanation */}
+      {/* Minimal Standby Prompt */}
       {!cameraActive && !isSimulatedDemo && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center select-none z-10">
-          <div className="relative w-32 h-36 mb-3 flex items-center justify-center">
-            <div className="absolute inset-0 rounded-full border border-cyan-500/30 animate-radar" />
-            <div className="absolute inset-4 rounded-full border border-indigo-500/25" />
-
-            <svg
-              viewBox="0 0 160 190"
-              className="w-full h-full text-cyan-400/40 drop-shadow-[0_0_15px_rgba(6,182,212,0.3)]"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-            >
-              <circle cx="80" cy="45" r="22" strokeDasharray="3 3" />
-              <ellipse cx="80" cy="46" rx="16" ry="20" stroke="currentColor" strokeOpacity="0.8" />
-              <path
-                d="M32 140 C35 98, 55 86, 80 86 C105 86, 125 98, 128 140"
-                stroke="currentColor"
-                strokeWidth="2.5"
-              />
-              <circle cx="48" cy="116" r="10" stroke="rgba(0,242,254,0.5)" strokeDasharray="2 2" />
-              <circle cx="112" cy="116" r="10" stroke="rgba(0,242,254,0.5)" strokeDasharray="2 2" />
-            </svg>
+        <div className="absolute inset-0 flex flex-col items-center justify-center p-5 text-center select-none z-10">
+          <div className="w-14 h-14 rounded-2xl bg-slate-900/90 border border-white/10 flex items-center justify-center mb-3">
+            <Camera className="w-6 h-6 text-slate-400" />
           </div>
-
-          <p className="text-sm font-bold text-white">Neural Face & Hand Tracker</p>
-          <p className="text-xs text-slate-300 mt-1 max-w-[280px] leading-relaxed">
-            Position yourself or a signer in frame. Tap <strong className="text-cyan-300">Start Camera</strong> to track face, head movement, and hands in real-time.
+          <p className="text-xs font-medium text-slate-300 max-w-[220px]">
+            {t('interpret.cameraOffPrompt')}
           </p>
-
-          <div className="mt-3 flex items-center gap-1.5 text-[10px] text-cyan-300/80 bg-slate-900/80 px-2.5 py-1 rounded-full border border-cyan-500/20">
-            <ShieldCheck className="w-3.5 h-3.5 text-cyan-400" />
-            <span>Front & Rear camera ready • 100% on-device WebGL processing</span>
-          </div>
         </div>
       )}
 
-      {/* Top HUD Overlay Bar */}
-      <div className="absolute top-3 inset-x-3 flex items-center justify-between z-20">
-        <div className="flex items-center gap-1.5">{getStatusBadge()}</div>
+      {/* Top Overlay Controls */}
+      <div className="absolute top-2.5 inset-x-2.5 flex items-center justify-between z-20">
+        <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/60 backdrop-blur-md border border-white/10 text-[11px] font-medium text-slate-200">
+          <span className={clsx('w-1.5 h-1.5 rounded-full', statusDotClass)} />
+          <span>{statusLabel}</span>
+        </div>
 
-        <div className="flex items-center gap-1.5 bg-slate-950/85 backdrop-blur-md px-2 py-1 rounded-full border border-cyan-500/30 shadow-lg">
-          {/* Flip camera button (front / rear switcher) */}
+        <div className="flex items-center gap-1 bg-black/60 backdrop-blur-md p-1 rounded-full border border-white/10">
           <button
             onClick={switchFacingMode}
-            className="p-1 rounded-full text-slate-300 hover:text-cyan-300 transition-colors cursor-pointer flex items-center gap-1 text-[10px] font-mono uppercase tracking-wider"
-            title={`Switch to ${facingMode === 'user' ? 'Rear' : 'Front'} Camera`}
+            className="px-2 py-1 rounded-full text-slate-200 hover:text-cyan-300 transition-colors cursor-pointer flex items-center gap-1 text-[10px] font-semibold"
             aria-label={`Switch to ${facingMode === 'user' ? 'Rear' : 'Front'} Camera`}
           >
-            <RefreshCw className="w-3.5 h-3.5 text-cyan-400" />
-            <span className="font-semibold text-cyan-200">
-              {facingMode === 'user' ? 'Front' : 'Rear'}
-            </span>
+            <RefreshCw className="w-3 h-3 text-cyan-400" />
+            <span>{facingMode === 'user' ? 'Front' : 'Rear'}</span>
           </button>
 
-          {/* Toggle landmark overlays */}
           <button
             onClick={() => setShowNeuralOverlays(!showNeuralOverlays)}
-            className="p-1 rounded-full text-slate-300 hover:text-cyan-300 transition-colors cursor-pointer ml-1"
-            title={showNeuralOverlays ? 'Hide Neural Tracking HUD' : 'Show Neural Tracking HUD'}
+            className="p-1 rounded-full text-slate-300 hover:text-cyan-300 transition-colors cursor-pointer"
             aria-label="Toggle Neural Tracking HUD"
           >
             {showNeuralOverlays ? (
@@ -449,54 +376,51 @@ export function CameraViewport({
         </div>
       </div>
 
-      {/* Bottom Floating Action Bar inside Viewport */}
-      <div className="absolute bottom-3 inset-x-3 flex items-center justify-between z-20 bg-slate-950/90 backdrop-blur-md p-2 rounded-2xl border border-cyan-500/30 text-xs shadow-xl">
-        <div className="flex items-center gap-2 text-slate-300 min-w-0 pr-2">
-          <Cpu className="w-3.5 h-3.5 text-cyan-400 shrink-0 animate-pulse" />
-          <span className="text-[11px] font-medium truncate">
-            {cameraActive
-              ? telemetry.isPersonTracked
-                ? `${facingMode === 'user' ? 'Front' : 'Rear'} Cam • ${telemetry.fps} FPS`
-                : 'Searching for Signer in Frame'
-              : `${facingMode === 'user' ? 'Front' : 'Rear'} Cam Standby`}
+      {/* Bottom Camera Power Bar */}
+      <div className="absolute bottom-2.5 inset-x-2.5 flex items-center justify-between z-20">
+        {cameraActive ? (
+          <span className="px-2.5 py-1 rounded-full bg-black/60 backdrop-blur-md border border-white/10 text-[10px] font-mono text-slate-300">
+            {telemetry.fps} FPS
           </span>
-        </div>
+        ) : (
+          <span />
+        )}
 
         <button
           id="btn-toggle-camera"
           onClick={toggleCamera}
-          className={`px-3.5 py-1.5 rounded-xl font-bold flex items-center gap-1.5 text-xs transition-all active:scale-95 cursor-pointer shrink-0 ${
+          className={clsx(
+            'px-3.5 py-2 rounded-full font-bold flex items-center gap-1.5 text-xs transition-all active:scale-95 cursor-pointer shadow-lg',
             cameraActive
-              ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40 hover:bg-rose-500/30'
-              : 'bg-cyan-500 hover:bg-cyan-400 text-slate-950 shadow-[0_0_15px_rgba(6,182,212,0.4)]'
-          }`}
-          aria-label={cameraActive ? 'Turn off camera' : 'Start camera'}
+              ? 'bg-rose-500/90 hover:bg-rose-500 text-white'
+              : 'bg-cyan-500 hover:bg-cyan-400 text-slate-950'
+          )}
+          aria-label={cameraActive ? t('interpret.cameraStop') : t('interpret.cameraStart')}
         >
           {cameraActive ? (
             <>
               <CameraOff className="w-3.5 h-3.5" />
-              <span>Stop Camera</span>
+              <span>{t('interpret.cameraStop')}</span>
             </>
           ) : (
             <>
-              <Camera className="w-3.5 h-3.5 fill-current" />
-              <span>Start Camera</span>
+              <Camera className="w-3.5 h-3.5" />
+              <span>{t('interpret.cameraStart')}</span>
             </>
           )}
         </button>
       </div>
 
-      {/* Helpful Error Banners */}
+      {/* Camera Error Notice */}
       {cameraError && (
-        <div className="absolute top-13 inset-x-3 p-3 rounded-2xl bg-rose-950/95 border border-rose-500/50 text-rose-100 text-xs z-30 shadow-xl backdrop-blur-md space-y-1.5">
-          <div className="flex items-center gap-1.5 font-bold text-rose-300">
-            <AlertTriangle className="w-4 h-4 shrink-0" />
-            <span>Camera Notice</span>
+        <div className="absolute top-12 inset-x-3 p-3 rounded-2xl bg-rose-950/95 border border-rose-500/40 text-rose-100 text-xs z-30 shadow-xl backdrop-blur-md flex items-start justify-between gap-2">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            <p className="text-[11px] leading-snug text-rose-100">{cameraError}</p>
           </div>
-          <p className="text-[11px] leading-relaxed text-rose-200">{cameraError}</p>
           <button
             onClick={() => setCameraError(null)}
-            className="text-[10px] text-white underline cursor-pointer pt-1"
+            className="text-[11px] font-semibold text-white underline shrink-0 cursor-pointer"
           >
             Dismiss
           </button>

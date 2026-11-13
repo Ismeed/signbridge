@@ -1,7 +1,13 @@
 'use client';
 
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { ActiveScreen, AppTab, SupportedLanguage, UserPreferences } from '@/lib/types';
+import {
+  ActiveScreen,
+  ActivityItem,
+  AppTab,
+  SupportedLanguage,
+  UserPreferences,
+} from '@/lib/types';
 import { triggerHaptic } from '@/lib/speech';
 import { LOCALES } from '@/lib/locales';
 
@@ -11,6 +17,7 @@ interface AppContextType {
   selectedLanguage: SupportedLanguage;
   preferences: UserPreferences;
   demoModeAutoStart: boolean;
+  activityHistory: ActivityItem[];
   t: (key: string) => string;
   navigateToTab: (tab: AppTab) => void;
   startLiveSession: () => void;
@@ -20,10 +27,13 @@ interface AppContextType {
   setLanguage: (lang: SupportedLanguage) => void;
   updatePreferences: (updates: Partial<UserPreferences>) => void;
   consumeDemoAutoStart: () => void;
+  addActivityItem: (item: Omit<ActivityItem, 'id' | 'timestamp'>) => void;
+  removeActivityItem: (id: string) => void;
+  clearActivity: () => void;
 }
 
 const defaultPreferences: UserPreferences = {
-  language: 'ha', // Default to Hausa
+  language: 'ha',
   hapticsEnabled: true,
   reducedMotion: false,
   highContrast: false,
@@ -33,36 +43,57 @@ const defaultPreferences: UserPreferences = {
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
+const MAX_ACTIVITY_ITEMS = 50;
+
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [activeScreen, setActiveScreen] = useState<ActiveScreen>('onboarding');
   const [activeTab, setActiveTab] = useState<AppTab>('home');
   const [selectedLanguage, setSelectedLanguageState] = useState<SupportedLanguage>('ha');
   const [preferences, setPreferences] = useState<UserPreferences>(defaultPreferences);
   const [demoModeAutoStart, setDemoModeAutoStart] = useState<boolean>(false);
+  const [activityHistory, setActivityHistory] = useState<ActivityItem[]>([]);
 
-  // Hydrate preferences and language from localStorage on client load
+  // Hydrate persisted state on client mount
   useEffect(() => {
-    try {
-      const savedLang = localStorage.getItem('signbridge_lang') as SupportedLanguage;
-      if (savedLang && ['en', 'ha', 'yo', 'ig', 'pcm'].includes(savedLang)) {
-        setSelectedLanguageState(savedLang);
+    const timer = setTimeout(() => {
+      try {
+        const hasOnboarded = localStorage.getItem('signbridge_onboarded');
+        if (hasOnboarded === 'true') {
+          setActiveScreen('app');
+        }
+
+        const savedLang = localStorage.getItem('signbridge_lang') as SupportedLanguage;
+        if (savedLang && ['en', 'ha', 'yo', 'ig', 'pcm'].includes(savedLang)) {
+          setSelectedLanguageState(savedLang);
+        }
+
+        const savedPrefs = localStorage.getItem('signbridge_prefs');
+        if (savedPrefs) {
+          const parsed = JSON.parse(savedPrefs);
+          setPreferences((prev) => ({ ...prev, ...parsed }));
+        }
+
+        const savedActivity = localStorage.getItem('signbridge_activity');
+        if (savedActivity) {
+          const parsedActivity = JSON.parse(savedActivity);
+          if (Array.isArray(parsedActivity)) {
+            setActivityHistory(parsedActivity.slice(0, MAX_ACTIVITY_ITEMS));
+          }
+        }
+
+        const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        if (prefersReduced) {
+          setPreferences((prev) => ({ ...prev, reducedMotion: true }));
+        }
+      } catch {
+        // Ignore storage errors in restrictive environments
       }
-      const savedPrefs = localStorage.getItem('signbridge_prefs');
-      if (savedPrefs) {
-        const parsed = JSON.parse(savedPrefs);
-        setPreferences((prev) => ({ ...prev, ...parsed }));
-      }
-      // Check system reduced motion
-      const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      if (prefersReduced) {
-        setPreferences((prev) => ({ ...prev, reducedMotion: true }));
-      }
-    } catch {
-      // Ignore storage errors in restrictive environments
-    }
+    }, 0);
+
+    return () => clearTimeout(timer);
   }, []);
 
-  // Update HTML class for reduced motion and high contrast
+  // Sync accessibility classes & font scale on document root
   useEffect(() => {
     if (typeof document !== 'undefined') {
       const root = document.documentElement;
@@ -81,6 +112,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       root.dataset.fontSize = preferences.fontSize;
     }
   }, [preferences.reducedMotion, preferences.highContrast, preferences.fontSize]);
+
+  const persistActivity = useCallback((items: ActivityItem[]) => {
+    try {
+      localStorage.setItem('signbridge_activity', JSON.stringify(items));
+    } catch {
+      // Storage safe
+    }
+  }, []);
 
   const setLanguage = (lang: SupportedLanguage) => {
     setSelectedLanguageState(lang);
@@ -106,32 +145,55 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     triggerHaptic('light', preferences.hapticsEnabled);
   };
 
+  const scrollMainToTop = useCallback(() => {
+    if (typeof document !== 'undefined') {
+      const mainEl = document.getElementById('app-main-scroll');
+      if (mainEl) {
+        mainEl.scrollTo({
+          top: 0,
+          behavior: preferences.reducedMotion ? 'auto' : 'smooth',
+        });
+      }
+    }
+  }, [preferences.reducedMotion]);
+
   const navigateToTab = (tab: AppTab) => {
     setActiveTab(tab);
     triggerHaptic('light', preferences.hapticsEnabled);
-    if (typeof window !== 'undefined') {
-      window.scrollTo({ top: 0, behavior: preferences.reducedMotion ? 'auto' : 'smooth' });
+    scrollMainToTop();
+  };
+
+  const markOnboarded = () => {
+    try {
+      localStorage.setItem('signbridge_onboarded', 'true');
+    } catch {
+      // Storage safe
     }
   };
 
   const enterAppFromOnboarding = () => {
+    markOnboarded();
     setActiveScreen('app');
     setActiveTab('home');
     triggerHaptic('medium', preferences.hapticsEnabled);
   };
 
   const startLiveSession = () => {
+    markOnboarded();
     setActiveScreen('app');
     setActiveTab('interpret');
     setDemoModeAutoStart(false);
     triggerHaptic('medium', preferences.hapticsEnabled);
+    scrollMainToTop();
   };
 
   const startDemoSession = () => {
+    markOnboarded();
     setActiveScreen('app');
     setActiveTab('interpret');
     setDemoModeAutoStart(true);
     triggerHaptic('medium', preferences.hapticsEnabled);
+    scrollMainToTop();
   };
 
   const goToOnboarding = () => {
@@ -139,9 +201,57 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     triggerHaptic('light', preferences.hapticsEnabled);
   };
 
-  const consumeDemoAutoStart = () => {
+  const consumeDemoAutoStart = useCallback(() => {
     setDemoModeAutoStart(false);
-  };
+  }, []);
+
+  const addActivityItem = useCallback(
+    (item: Omit<ActivityItem, 'id' | 'timestamp'>) => {
+      const now = Date.now();
+      setActivityHistory((prev) => {
+        // Deduplicate immediate replays of the same phrase & language within 10s
+        const latest = prev[0];
+        if (
+          latest &&
+          latest.phraseId === item.phraseId &&
+          latest.language === item.language &&
+          now - latest.timestamp < 10000
+        ) {
+          const updated = [{ ...latest, timestamp: now }, ...prev.slice(1)];
+          persistActivity(updated);
+          return updated;
+        }
+
+        const newItem: ActivityItem = {
+          ...item,
+          id: `${now}-${Math.random().toString(36).slice(2, 7)}`,
+          timestamp: now,
+        };
+        const next = [newItem, ...prev].slice(0, MAX_ACTIVITY_ITEMS);
+        persistActivity(next);
+        return next;
+      });
+    },
+    [persistActivity]
+  );
+
+  const removeActivityItem = useCallback(
+    (id: string) => {
+      setActivityHistory((prev) => {
+        const next = prev.filter((item) => item.id !== id);
+        persistActivity(next);
+        return next;
+      });
+      triggerHaptic('light', preferences.hapticsEnabled);
+    },
+    [persistActivity, preferences.hapticsEnabled]
+  );
+
+  const clearActivity = useCallback(() => {
+    setActivityHistory([]);
+    persistActivity([]);
+    triggerHaptic('medium', preferences.hapticsEnabled);
+  }, [persistActivity, preferences.hapticsEnabled]);
 
   const t = useCallback(
     (key: string): string => {
@@ -159,6 +269,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         selectedLanguage,
         preferences,
         demoModeAutoStart,
+        activityHistory,
         t,
         navigateToTab,
         startLiveSession,
@@ -168,6 +279,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         setLanguage,
         updatePreferences,
         consumeDemoAutoStart,
+        addActivityItem,
+        removeActivityItem,
+        clearActivity,
       }}
     >
       {children}

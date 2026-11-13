@@ -1,27 +1,21 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import clsx from 'clsx';
 import {
   Volume2,
   VolumeX,
   Play,
   RotateCcw,
-  Sparkles,
-  CheckCircle2,
+  Check,
   Hand,
   ChevronDown,
-  Maximize2,
-  Minimize2,
   Info,
   ArrowRight,
-  ShieldCheck,
-  UserCheck,
-  UserX,
 } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import { CameraViewport } from '@/components/ui/CameraViewport';
 import { WaveformVisualizer } from '@/components/ui/WaveformVisualizer';
-import { Badge } from '@/components/ui/Badge';
 import { DEMO_PHRASES, SUPPORTED_LANGUAGES } from '@/lib/translations';
 import {
   InterpretationState,
@@ -32,7 +26,6 @@ import {
   SpeechService,
   triggerHaptic,
   PlaybackState,
-  VoiceDiagnostic,
 } from '@/lib/speech';
 
 export type GuidedDemoStep =
@@ -46,39 +39,33 @@ export type GuidedDemoStep =
 export function InterpretScreen() {
   const {
     selectedLanguage,
-    setLanguage,
     preferences,
     demoModeAutoStart,
     consumeDemoAutoStart,
+    addActivityItem,
     t,
   } = useApp();
 
-  // Guided demo sequence states
   const [demoStep, setDemoStep] = useState<GuidedDemoStep>('ready');
   const [activePhraseIndex, setActivePhraseIndex] = useState<number>(0);
   const [playbackState, setPlaybackState] = useState<PlaybackState>('ready');
-  const [voiceDiagnostic, setVoiceDiagnostic] = useState<VoiceDiagnostic | null>(null);
+  const [revealedWordCount, setRevealedWordCount] = useState<number>(
+    DEMO_PHRASES[0].translations[selectedLanguage].split(' ').length
+  );
 
-  // Progressive caption reveal state
-  const [revealedWordCount, setRevealedWordCount] = useState<number>(0);
-
-  // UI modes
-  const [showcaseMode, setShowcaseMode] = useState<boolean>(false);
   const [showPhrasePicker, setShowPhrasePicker] = useState<boolean>(false);
-
-  // Real camera & person detection tracking states
+  const [showSignGuide, setShowSignGuide] = useState<boolean>(false);
   const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
-  const [isPersonDetected, setIsPersonDetected] = useState<boolean>(false);
+
+  const isCameraActiveRef = useRef<boolean>(false);
+  useEffect(() => {
+    isCameraActiveRef.current = isCameraActive;
+  }, [isCameraActive]);
 
   const handleCameraToggle = useCallback((active: boolean) => {
     setIsCameraActive(active);
   }, []);
 
-  const handlePersonDetect = useCallback((detected: boolean) => {
-    setIsPersonDetected(detected);
-  }, []);
-
-  // Timers ref for clean teardown
   const sequenceTimerRef = useRef<NodeJS.Timeout | null>(null);
   const captionTimerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -86,10 +73,9 @@ export function InterpretScreen() {
   const translatedCaption = activePhrase.translations[selectedLanguage];
   const phoneticGuide = activePhrase.phoneticGuide?.[selectedLanguage];
   const currentLang = SUPPORTED_LANGUAGES[selectedLanguage];
-
   const words = translatedCaption.split(' ');
 
-  // Clean up any ongoing timers and audio on unmount
+  // Clean up timers and audio on unmount
   useEffect(() => {
     return () => {
       SpeechService.stop();
@@ -98,27 +84,30 @@ export function InterpretScreen() {
     };
   }, []);
 
-  // Inspect available voices whenever selected language changes
+  // Initialize speech synthesis voices on language change
   useEffect(() => {
     SpeechService.init();
-    const diag = SpeechService.inspectVoice(selectedLanguage);
-    setVoiceDiagnostic(diag);
   }, [selectedLanguage]);
 
-  // Stop speech and clear caption animation when language or active phrase changes
   const resetPlaybackAndSpeech = useCallback(() => {
     SpeechService.stop();
     setPlaybackState('ready');
     if (captionTimerRef.current) clearInterval(captionTimerRef.current);
-    setRevealedWordCount(words.length);
-  }, [words.length]);
+  }, []);
 
-  // Execute Gemini neural audio output
   const playVoiceOutput = useCallback(
-    (textToSpeak: string, langToSpeak: SupportedLanguage) => {
+    (textToSpeak: string, langToSpeak: SupportedLanguage, phraseMeta: DemoPhrase) => {
       setPlaybackState('speaking');
       setDemoStep('speaking');
       triggerHaptic('light', preferences.hapticsEnabled);
+
+      addActivityItem({
+        phraseId: phraseMeta.id,
+        signConcept: phraseMeta.signConcept,
+        translatedText: textToSpeak,
+        language: langToSpeak,
+        source: isCameraActiveRef.current ? 'live' : 'demo',
+      });
 
       SpeechService.speak(textToSpeak, langToSpeak, {
         onStart: () => {
@@ -136,10 +125,9 @@ export function InterpretScreen() {
         },
       });
     },
-    [preferences.hapticsEnabled]
+    [preferences.hapticsEnabled, addActivityItem]
   );
 
-  // Progressive word-by-word caption reveal
   const animateCaptionReveal = useCallback(
     (targetWords: string[], onRevealComplete: () => void) => {
       if (preferences.reducedMotion) {
@@ -161,12 +149,11 @@ export function InterpretScreen() {
           if (captionTimerRef.current) clearInterval(captionTimerRef.current);
           onRevealComplete();
         }
-      }, 140);
+      }, 130);
     },
     [preferences.reducedMotion]
   );
 
-  // Step-by-Step Guided Demonstration Flow
   const startGuidedDemo = useCallback(
     (phraseIndex: number = activePhraseIndex) => {
       SpeechService.stop();
@@ -178,27 +165,23 @@ export function InterpretScreen() {
       const targetText = targetPhrase.translations[selectedLanguage];
       const targetWordsList = targetText.split(' ');
 
-      // Step 1: Detect subject
       setDemoStep('tracking');
       triggerHaptic('medium', preferences.hapticsEnabled);
 
       sequenceTimerRef.current = setTimeout(() => {
-        // Step 2: Demonstrating gesture
         setDemoStep('demonstrating');
         triggerHaptic('light', preferences.hapticsEnabled);
 
         sequenceTimerRef.current = setTimeout(() => {
-          // Step 3: Caption Reveal
           setDemoStep('captioning');
 
           animateCaptionReveal(targetWordsList, () => {
-            // Step 4: Spoken Voice Output
             sequenceTimerRef.current = setTimeout(() => {
-              playVoiceOutput(targetText, selectedLanguage);
-            }, 300);
+              playVoiceOutput(targetText, selectedLanguage, targetPhrase);
+            }, 250);
           });
-        }, 1200);
-      }, 900);
+        }, 1000);
+      }, 800);
     },
     [
       activePhraseIndex,
@@ -209,12 +192,14 @@ export function InterpretScreen() {
     ]
   );
 
-  // Handle external auto-start from Home "Explore Demo"
+  // Auto-start demo when launched from Home / Onboarding
   useEffect(() => {
-    if (demoModeAutoStart) {
+    if (!demoModeAutoStart) return;
+    const timer = setTimeout(() => {
       consumeDemoAutoStart();
       startGuidedDemo(0);
-    }
+    }, 0);
+    return () => clearTimeout(timer);
   }, [demoModeAutoStart, consumeDemoAutoStart, startGuidedDemo]);
 
   const stopActiveSpeech = () => {
@@ -225,7 +210,7 @@ export function InterpretScreen() {
   };
 
   const replayVoice = () => {
-    playVoiceOutput(translatedCaption, selectedLanguage);
+    playVoiceOutput(translatedCaption, selectedLanguage, activePhrase);
   };
 
   const resetGuidedExperience = () => {
@@ -250,19 +235,6 @@ export function InterpretScreen() {
     handleSelectScenario(nextIdx);
   };
 
-  const handleLanguageChange = (lang: SupportedLanguage) => {
-    setLanguage(lang);
-    resetPlaybackAndSpeech();
-    const newText = activePhrase.translations[lang];
-    setRevealedWordCount(newText.split(' ').length);
-
-    if (demoStep === 'complete' || demoStep === 'speaking') {
-      setTimeout(() => {
-        playVoiceOutput(newText, lang);
-      }, 250);
-    }
-  };
-
   const getCameraViewportState = (): InterpretationState => {
     switch (demoStep) {
       case 'tracking':
@@ -281,305 +253,82 @@ export function InterpretScreen() {
     }
   };
 
+  const isRunningDemo =
+    demoStep === 'tracking' ||
+    demoStep === 'demonstrating' ||
+    demoStep === 'captioning';
+
+  const stepStatusLabel =
+    demoStep === 'tracking'
+      ? t('interpret.statusTracking')
+      : demoStep === 'demonstrating'
+        ? t('interpret.statusDemonstrating')
+        : demoStep === 'captioning'
+          ? t('interpret.statusCaptioning')
+          : demoStep === 'speaking'
+            ? t('interpret.statusSpeaking')
+            : null;
+
   return (
-    <div
-      className={`flex flex-col flex-1 px-4 py-4 pb-safe space-y-4 max-w-md mx-auto w-full transition-all ${
-        showcaseMode ? 'bg-[#040814] min-h-screen py-2' : ''
-      }`}
-    >
-      {/* Platform Mode & Presentation View Switcher */}
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5 min-w-0">
-          <Badge variant="cyan" size="sm">
-            <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-            <span className="font-semibold text-[11px] truncate">SignBridge AI</span>
-          </Badge>
-          <span className="text-[10px] font-mono text-emerald-400 bg-emerald-950/40 px-2 py-0.5 rounded-full border border-emerald-500/20 shrink-0 flex items-center gap-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            {t('status.systemActive')}
-          </span>
-        </div>
-
-        {/* Focused Showcase Mode Toggle */}
-        <button
-          id="btn-toggle-showcase-mode"
-          onClick={() => {
-            setShowcaseMode(!showcaseMode);
-            triggerHaptic('medium', preferences.hapticsEnabled);
-          }}
-          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
-            showcaseMode
-              ? 'bg-cyan-500 text-slate-950 border-cyan-400 shadow-[0_0_12px_rgba(6,182,212,0.5)]'
-              : 'bg-slate-900/80 text-cyan-300 border-cyan-500/30 hover:bg-cyan-500/10'
-          }`}
-          title="Toggle Showcase View"
-          aria-label="Toggle Showcase View"
-        >
-          {showcaseMode ? (
-            <>
-              <Minimize2 className="w-3.5 h-3.5" />
-              <span>Standard</span>
-            </>
-          ) : (
-            <>
-              <Maximize2 className="w-3.5 h-3.5" />
-              <span>Showcase</span>
-            </>
-          )}
-        </button>
-      </div>
-
-      {/* Real-Time Processing Status Bar */}
-      <div className="flex items-center justify-between px-3.5 py-2 rounded-xl bg-slate-900/80 border border-cyan-500/20 text-slate-200 text-xs shadow-sm">
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse shrink-0" />
-          <span className="font-medium text-[11px] leading-tight text-slate-300 truncate">
-            {isCameraActive
-              ? (isPersonDetected ? t('interpret.personDetected') : t('interpret.noPerson'))
-              : t('interpret.cameraOffPrompt')}
-          </span>
-        </div>
-        <Badge variant={isCameraActive ? (isPersonDetected ? 'emerald' : 'cyan') : 'slate'} size="sm">
-          {isCameraActive ? (isPersonDetected ? 'Locked' : 'Scanning') : t('status.online')}
-        </Badge>
-      </div>
-
-      {/* Live Camera Viewport */}
+    <div className="flex flex-col flex-1 px-4 py-3.5 space-y-3.5 max-w-md mx-auto w-full">
+      {/* 1. Live Camera Viewfinder */}
       <CameraViewport
         state={getCameraViewportState()}
         isSimulatedDemo={demoStep !== 'ready'}
         onCameraToggle={handleCameraToggle}
-        onPersonDetect={handlePersonDetect}
       />
 
-      {/* Step Progress Tracker Bar */}
-      <div className="px-3.5 py-2 rounded-2xl bg-slate-950/70 border border-white/5 flex items-center justify-between text-[11px] font-mono">
-        <div className="flex items-center gap-1.5">
-          <span className="text-slate-400">Step:</span>
-          <span className="font-bold text-cyan-300 uppercase tracking-wider">
-            {demoStep === 'ready' && t('interpret.statusReady')}
-            {demoStep === 'tracking' && t('interpret.statusTracking')}
-            {demoStep === 'demonstrating' && t('interpret.statusDemonstrating')}
-            {demoStep === 'captioning' && t('interpret.statusCaptioning')}
-            {demoStep === 'speaking' && t('interpret.statusSpeaking')}
-            {demoStep === 'complete' && t('interpret.statusComplete')}
-          </span>
-        </div>
-
-        {/* Real Person Tracking Status Pill */}
-        <div className="flex items-center gap-1">
-          {isCameraActive ? (
-            isPersonDetected ? (
-              <span className="flex items-center gap-1 text-emerald-400 text-[10px]">
-                <UserCheck className="w-3 h-3" />
-                <span>Tracked</span>
-              </span>
-            ) : (
-              <span className="flex items-center gap-1 text-cyan-300 text-[10px]">
-                <UserX className="w-3 h-3 animate-pulse" />
-                <span>Searching</span>
-              </span>
-            )
-          ) : (
-            <span className="text-slate-500 text-[10px]">Standby</span>
-          )}
-        </div>
-      </div>
-
-      {/* Primary Interpretation Controls Toolbar */}
-      <div className="grid grid-cols-2 gap-2.5">
-        <button
-          id="btn-start-guided-demo"
-          onClick={() => startGuidedDemo(activePhraseIndex)}
-          disabled={demoStep === 'demonstrating' || demoStep === 'captioning'}
-          className={`h-12 rounded-2xl font-bold text-xs flex items-center justify-center gap-2 transition-all active:scale-95 cursor-pointer disabled:opacity-50 ${
-            demoStep === 'demonstrating' || demoStep === 'speaking'
-              ? 'bg-amber-500 text-slate-950 animate-pulse shadow-[0_0_15px_rgba(245,158,11,0.5)]'
-              : 'bg-cyan-500 hover:bg-cyan-400 text-slate-950 shadow-[0_0_15px_rgba(6,182,212,0.4)]'
-          }`}
-          aria-label={t('interpret.startPractice')}
-        >
-          <Play className="w-4 h-4 fill-current" />
-          <span>
-            {demoStep === 'complete'
-              ? t('interpret.repeatAudio')
-              : demoStep === 'speaking'
-              ? t('interpret.statusSpeaking')
-              : t('interpret.startPractice')}
-          </span>
-        </button>
-
-        <button
-          id="btn-reset-guided-experience"
-          onClick={resetGuidedExperience}
-          className="h-12 rounded-2xl bg-slate-900 border border-white/10 hover:border-cyan-500/30 text-slate-300 hover:text-white font-medium text-xs flex items-center justify-center gap-2 transition-all active:scale-95 cursor-pointer"
-          aria-label="Reset"
-        >
-          <RotateCcw className="w-4 h-4 text-slate-400" />
-          <span>Reset</span>
-        </button>
-      </div>
-
-      {/* Focused Interpretation Presentation Card */}
-      <div
-        className={`p-4 rounded-3xl bg-slate-900/85 border border-cyan-500/25 backdrop-blur-xl space-y-3.5 shadow-xl transition-all ${
-          showcaseMode ? 'ring-2 ring-cyan-400/40' : ''
-        }`}
-      >
-        {/* Caption Header & Language Selector */}
-        <div className="flex items-center justify-between border-b border-white/10 pb-3">
-          <div className="flex items-center gap-2 min-w-0 pr-2">
-            <span className="p-1.5 rounded-lg bg-cyan-500/20 text-cyan-400 shrink-0">
-              <Hand className="w-4 h-4" />
-            </span>
-            <div className="min-w-0">
-              <p className="text-xs font-bold text-white truncate">
-                {t('interpret.signConceptLabel')}: {activePhrase.signConcept}
-              </p>
-              <p className="text-[10px] text-cyan-400 font-mono truncate">
-                {activePhrase.category}
-              </p>
-            </div>
-          </div>
-
-          {/* 5 Spoken Output Languages Dropdown */}
-          <div className="relative shrink-0">
-            <select
-              id="select-interpret-language"
-              value={selectedLanguage}
-              onChange={(e) => handleLanguageChange(e.target.value as SupportedLanguage)}
-              className="bg-slate-950 border border-cyan-500/40 text-cyan-300 text-xs font-bold px-3 py-1.5 rounded-xl focus:outline-none focus:ring-2 focus:ring-cyan-400 cursor-pointer shadow-sm"
-              aria-label="Language Selector"
-            >
-              {Object.values(SUPPORTED_LANGUAGES).map((l) => (
-                <option key={l.code} value={l.code} className="bg-slate-950 text-white">
-                  {l.name} ({l.nativeName})
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-
-        {/* Dynamic Caption Box with Smooth Progressive Reveal */}
-        <div
-          className={`relative rounded-2xl bg-[#060b17] border border-cyan-500/20 flex flex-col justify-center transition-all ${
-            showcaseMode ? 'p-5 min-h-[120px]' : 'p-3.5 min-h-[90px]'
-          }`}
-        >
-          <div className="flex items-center justify-between mb-1">
-            <span className="text-[10px] font-mono uppercase tracking-wider text-cyan-400/80">
-              {t('interpret.realtimeCaptionLabel')} [{currentLang.name}]
-            </span>
-            <span className="text-[9px] font-mono text-slate-400 bg-slate-900 px-1.5 py-0.5 rounded">
-              {currentLang.region}
-            </span>
-          </div>
-
-          {/* Progressive Animated Caption Text */}
-          <p
-            className={`font-extrabold text-white tracking-tight leading-snug transition-all ${
-              showcaseMode ? 'text-xl sm:text-2xl text-cyan-100' : 'text-base sm:text-lg'
-            }`}
+      {/* 2. Live Translation Output Card */}
+      <div className="p-4 rounded-3xl bg-[#0c1322] border border-white/[0.08] space-y-3 app-card-surface">
+        {/* Card Header: Sign Concept Picker + Quick Controls */}
+        <div className="flex items-center justify-between gap-2">
+          <button
+            id="btn-toggle-scenario-picker"
+            onClick={() => setShowPhrasePicker(!showPhrasePicker)}
+            className="flex items-center gap-2 min-w-0 px-2.5 py-1.5 -ml-1.5 rounded-xl hover:bg-white/[0.05] transition-colors cursor-pointer"
+            aria-expanded={showPhrasePicker}
           >
-            "
-            {words.map((word, idx) => {
-              const isVisible = idx < revealedWordCount;
-              return (
-                <span
-                  key={idx}
-                  className={`inline-block mr-1.5 transition-opacity duration-200 ${
-                    isVisible
-                      ? 'opacity-100 translate-y-0 text-white'
-                      : 'opacity-20 text-slate-500'
-                  }`}
-                >
-                  {word}
-                </span>
-              );
-            })}
-            "
-          </p>
-
-          {/* Phonetic Pronunciation Guide */}
-          {phoneticGuide && (
-            <p className="text-[11px] font-mono text-cyan-300/80 mt-1 italic">
-              {t('interpret.phoneticGuideLabel')}: {phoneticGuide}
-            </p>
-          )}
-
-          {/* Physical NSL Sign Motion Instruction Guide */}
-          <div className="mt-2.5 pt-2 border-t border-white/5 flex items-start gap-1.5 text-[11px] text-slate-300 leading-snug">
-            <span className="text-cyan-400 font-semibold shrink-0">{t('interpret.movementLabel')}:</span>
-            <span className="italic text-slate-400">{activePhrase.signDescription}</span>
-          </div>
-        </div>
-
-        {/* Audio Synthesis Diagnostic & Voice Notification */}
-        {voiceDiagnostic && (
-          <div className="flex items-start gap-2 px-3 py-1.5 rounded-xl bg-slate-950/60 border border-white/5 text-[10px] text-slate-400">
-            <Info className="w-3.5 h-3.5 text-cyan-400 shrink-0 mt-0.5" />
-            <span className="leading-tight">{voiceDiagnostic.statusMessage}</span>
-          </div>
-        )}
-
-        {/* Speech Synthesis Event-Driven Audio Controls & Waveform */}
-        <div className="flex items-center justify-between gap-3 pt-1">
-          {/* Waveform Visualizer Driven Directly by Speech Events */}
-          <div className="flex-1 min-w-0">
-            <WaveformVisualizer
-              playbackState={playbackState}
-              reducedMotion={preferences.reducedMotion}
+            <Hand className="w-4 h-4 text-cyan-400 shrink-0" />
+            <span className="text-xs font-bold text-white truncate">
+              {activePhrase.signConcept}
+            </span>
+            <ChevronDown
+              className={clsx(
+                'w-3.5 h-3.5 text-slate-400 shrink-0 transition-transform',
+                showPhrasePicker && 'rotate-180'
+              )}
             />
-          </div>
+          </button>
 
-          {/* Audio Play / Stop / Replay Controls */}
-          <div className="flex items-center gap-2 shrink-0">
-            {playbackState === 'speaking' ? (
-              <button
-                id="btn-stop-speech"
-                onClick={stopActiveSpeech}
-                className="h-11 px-4 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-300 font-semibold text-xs flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer shadow-sm"
-                aria-label="Stop speech"
-              >
-                <VolumeX className="w-4 h-4" />
-                <span>Stop</span>
-              </button>
-            ) : (
-              <button
-                id="btn-replay-speech"
-                onClick={replayVoice}
-                className="h-11 px-4 rounded-xl bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-cyan-300 font-bold text-xs flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer shadow-sm"
-                aria-label="Play audio"
-              >
-                <Volume2 className="w-4 h-4 text-cyan-400" />
-                <span>{playbackState === 'finished' ? t('interpret.repeatAudio') : 'Play Voice'}</span>
-              </button>
-            )}
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              onClick={() => setShowSignGuide(!showSignGuide)}
+              className={clsx(
+                'p-1.5 rounded-lg border transition-colors cursor-pointer',
+                showSignGuide
+                  ? 'bg-cyan-500/15 border-cyan-400/40 text-cyan-300'
+                  : 'bg-slate-900 border-white/[0.06] text-slate-400 hover:text-slate-200'
+              )}
+              aria-label={t('interpret.movementLabel')}
+              aria-pressed={showSignGuide}
+            >
+              <Info className="w-3.5 h-3.5" />
+            </button>
+
+            <button
+              id="btn-next-scenario"
+              onClick={nextScenario}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-900 border border-white/[0.08] hover:border-cyan-500/30 text-[11px] font-semibold text-cyan-300 cursor-pointer transition-colors"
+            >
+              <span>{t('interpret.nextSign')}</span>
+              <ArrowRight className="w-3 h-3" />
+            </button>
           </div>
         </div>
-      </div>
 
-      {/* Phrase Library Accordion Selector */}
-      <div className="p-3.5 rounded-2xl bg-slate-900/60 border border-white/10 space-y-2">
-        <button
-          id="btn-toggle-scenario-picker"
-          onClick={() => setShowPhrasePicker(!showPhrasePicker)}
-          className="w-full flex items-center justify-between text-xs font-semibold text-slate-200 cursor-pointer"
-          aria-expanded={showPhrasePicker}
-        >
-          <div className="flex items-center gap-1.5">
-            <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-            <span>{t('interpret.selectPhrase')} ({DEMO_PHRASES.length})</span>
-          </div>
-          <ChevronDown
-            className={`w-4 h-4 text-slate-400 transition-transform ${
-              showPhrasePicker ? 'rotate-180' : ''
-            }`}
-          />
-        </button>
-
-        {showPhrasePicker && (
-          <div className="grid grid-cols-1 gap-2 pt-2">
+        {/* Inline Phrase Selector (Expanded on Demand) */}
+        {showPhrasePicker ? (
+          <div className="space-y-1.5 pt-1 max-h-52 overflow-y-auto no-scrollbar">
             {DEMO_PHRASES.map((phrase, idx) => {
               const isSelected = idx === activePhraseIndex;
               return (
@@ -587,58 +336,145 @@ export function InterpretScreen() {
                   key={phrase.id}
                   id={`btn-scenario-${phrase.id}`}
                   onClick={() => handleSelectScenario(idx)}
-                  className={`p-3 rounded-xl border text-left flex items-start justify-between text-xs transition-all cursor-pointer ${
+                  className={clsx(
+                    'w-full px-3 py-2.5 rounded-xl border text-left flex items-center justify-between gap-2 transition-colors cursor-pointer',
                     isSelected
-                      ? 'bg-cyan-500/15 border-cyan-400 text-white shadow-md'
-                      : 'bg-slate-950/70 border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700'
-                  }`}
+                      ? 'bg-cyan-500/15 border-cyan-400/50 text-white'
+                      : 'bg-slate-950/60 border-white/[0.06] text-slate-300 hover:border-white/15'
+                  )}
                   aria-pressed={isSelected}
                 >
-                  <div className="space-y-0.5 min-w-0 pr-2">
-                    <div className="flex items-center gap-1.5">
-                      <span className="font-bold text-white text-xs">{phrase.signConcept}</span>
-                      <span className="text-[9px] font-mono text-cyan-400 bg-cyan-950/80 px-1.5 py-0.2 rounded border border-cyan-500/20">
-                        {phrase.category}
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-slate-300 line-clamp-1 italic">
-                      "{phrase.translations[selectedLanguage]}"
+                  <div className="min-w-0">
+                    <p className="text-xs font-semibold text-white truncate">
+                      {phrase.signConcept}
+                    </p>
+                    <p className="text-[11px] text-slate-400 truncate">
+                      {phrase.translations[selectedLanguage]}
                     </p>
                   </div>
-                  {isSelected ? (
-                    <CheckCircle2 className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
-                  ) : (
-                    <ArrowRight className="w-3.5 h-3.5 text-slate-600 shrink-0 mt-0.5" />
-                  )}
+                  {isSelected && <Check className="w-4 h-4 text-cyan-400 shrink-0" />}
                 </button>
               );
             })}
           </div>
+        ) : (
+          <>
+            {/* Translation Caption Box */}
+            <div className="rounded-2xl bg-[#070b15] border border-white/[0.06] p-3.5 space-y-1.5">
+              <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider">
+                <span className="text-slate-400">{currentLang.name}</span>
+                {stepStatusLabel && (
+                  <span className="text-cyan-400">{stepStatusLabel}</span>
+                )}
+              </div>
+
+              <p className="text-lg font-bold text-white leading-snug tracking-tight">
+                {words.map((word, idx) => {
+                  const isVisible =
+                    demoStep !== 'captioning' || idx < revealedWordCount;
+                  return (
+                    <span
+                      key={idx}
+                      className={clsx(
+                        'inline-block mr-1.5 transition-opacity duration-150',
+                        isVisible ? 'opacity-100 text-white' : 'opacity-20 text-slate-500'
+                      )}
+                    >
+                      {word}
+                    </span>
+                  );
+                })}
+              </p>
+
+              {phoneticGuide && (
+                <p className="text-xs text-slate-400 italic leading-snug">
+                  {phoneticGuide}
+                </p>
+              )}
+
+              {showSignGuide && (
+                <div className="pt-2 mt-2 border-t border-white/[0.06] text-[11px] text-slate-300 leading-relaxed">
+                  <span className="text-cyan-400 font-semibold mr-1">
+                    {t('interpret.movementLabel')}:
+                  </span>
+                  <span>{activePhrase.signDescription}</span>
+                </div>
+              )}
+            </div>
+
+            {/* Waveform & Speak Button */}
+            <div className="flex items-center gap-2">
+              <div className="flex-1 min-w-0">
+                <WaveformVisualizer
+                  playbackState={playbackState}
+                  reducedMotion={preferences.reducedMotion}
+                />
+              </div>
+
+              {playbackState === 'speaking' ? (
+                <button
+                  id="btn-stop-speech"
+                  onClick={stopActiveSpeech}
+                  className="h-10 px-3.5 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-300 font-semibold text-xs flex items-center gap-1.5 active:scale-95 transition-all cursor-pointer shrink-0"
+                  aria-label={t('interpret.stopVoice')}
+                >
+                  <VolumeX className="w-4 h-4" />
+                  <span>{t('interpret.stopVoice')}</span>
+                </button>
+              ) : (
+                <button
+                  id="btn-replay-speech"
+                  onClick={replayVoice}
+                  className="h-10 px-3.5 rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-400/35 text-cyan-300 font-semibold text-xs flex items-center gap-1.5 active:scale-95 transition-all cursor-pointer shrink-0"
+                  aria-label={t('interpret.playVoice')}
+                >
+                  <Volume2 className="w-4 h-4 text-cyan-400" />
+                  <span>
+                    {playbackState === 'finished'
+                      ? t('interpret.repeatAudio')
+                      : t('interpret.playVoice')}
+                  </span>
+                </button>
+              )}
+            </div>
+          </>
         )}
       </div>
 
-      {/* Next Scenario Shortcut Button */}
-      <div className="flex items-center justify-between px-2 pt-1">
-        <span className="text-[11px] text-slate-400">
-          Current: <strong className="text-white">{activePhrase.signConcept}</strong>
-        </span>
+      {/* 3. Primary Controls Row */}
+      <div className="flex items-center gap-2.5 pb-1">
         <button
-          id="btn-next-scenario"
-          onClick={nextScenario}
-          className="text-xs font-bold text-cyan-300 hover:text-cyan-200 flex items-center gap-1 cursor-pointer"
+          id="btn-start-guided-demo"
+          onClick={() => startGuidedDemo(activePhraseIndex)}
+          disabled={isRunningDemo}
+          className={clsx(
+            'flex-1 h-12 rounded-2xl font-bold text-sm flex items-center justify-center gap-2 transition-all active:scale-[0.98] cursor-pointer disabled:opacity-60',
+            demoStep === 'speaking'
+              ? 'bg-amber-400 text-slate-950'
+              : 'bg-cyan-500 hover:bg-cyan-400 text-slate-950 shadow-[0_4px_18px_-4px_rgba(6,182,212,0.45)]'
+          )}
         >
-          <span>{t('interpret.nextSign')}</span>
-          <ArrowRight className="w-3.5 h-3.5" />
+          <Play className="w-4 h-4 fill-current" />
+          <span>
+            {demoStep === 'complete'
+              ? t('interpret.repeatAudio')
+              : demoStep === 'speaking'
+                ? t('interpret.statusSpeaking')
+                : isRunningDemo
+                  ? stepStatusLabel
+                  : t('interpret.startPractice')}
+          </span>
         </button>
-      </div>
 
-      {/* Privacy & Hardware Standards Footer */}
-      <div className="p-3 rounded-2xl bg-slate-950/40 border border-white/5 text-[11px] text-slate-400 flex items-center justify-between select-none">
-        <div className="flex items-center gap-2">
-          <ShieldCheck className="w-4 h-4 text-cyan-400 shrink-0" />
-          <span className="text-slate-300 font-medium">On-Device Neural Vision • Zero Cloud Upload</span>
-        </div>
-        <span className="text-[10px] font-mono text-cyan-400/80">Active</span>
+        <button
+          id="btn-reset-guided-experience"
+          onClick={resetGuidedExperience}
+          className="h-12 px-4 rounded-2xl bg-[#0c1322] border border-white/[0.08] hover:border-white/20 text-slate-300 hover:text-white font-semibold text-xs flex items-center justify-center gap-1.5 active:scale-95 transition-all cursor-pointer app-card-surface"
+          aria-label={t('interpret.reset')}
+        >
+          <RotateCcw className="w-4 h-4 text-slate-400" />
+          <span>{t('interpret.reset')}</span>
+        </button>
       </div>
     </div>
   );

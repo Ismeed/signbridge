@@ -1,22 +1,17 @@
 'use client';
 
 import React from 'react';
+import clsx from 'clsx';
 import {
-  Sparkles,
   Camera,
   Play,
-  Languages,
-  CheckCircle2,
+  Check,
   ChevronRight,
-  Zap,
-  Ear,
-  MessageSquare,
-  ShieldCheck,
+  Clock,
 } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import { SUPPORTED_LANGUAGES } from '@/lib/translations';
 import { SupportedLanguage } from '@/lib/types';
-import { Badge } from '@/components/ui/Badge';
 
 export function HomeScreen() {
   const {
@@ -24,132 +19,85 @@ export function HomeScreen() {
     setLanguage,
     startLiveSession,
     startDemoSession,
+    navigateToTab,
+    activityHistory,
     t,
   } = useApp();
 
   const currentLangInfo = SUPPORTED_LANGUAGES[selectedLanguage];
+  const latestActivity = activityHistory[0];
 
   return (
-    <div className="flex flex-col flex-1 px-4 py-4 pb-safe space-y-4 max-w-md mx-auto w-full">
-      {/* Personalized Greeting Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <div className="flex items-center gap-1.5 text-xs font-medium text-cyan-400">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            <span className="text-emerald-400 font-semibold">{t('status.liveActive')}</span>
+    <div className="flex flex-col flex-1 px-4 py-5 space-y-5 max-w-md mx-auto w-full">
+      {/* Concise Greeting */}
+      <div className="space-y-1">
+        <h1 className="text-2xl font-extrabold text-white tracking-tight leading-tight">
+          {currentLangInfo.greeting}
+        </h1>
+        <p className="text-sm text-slate-400">{t('home.subtitle')}</p>
+      </div>
+
+      {/* Primary Action: Live Interpretation */}
+      <button
+        id="card-start-live-session"
+        onClick={startLiveSession}
+        className="w-full text-left relative overflow-hidden p-5 rounded-3xl bg-gradient-to-br from-[#0e2646] via-[#0b1b34] to-[#081224] border border-cyan-400/30 shadow-[0_14px_34px_-14px_rgba(6,182,212,0.45)] active:scale-[0.98] transition-all cursor-pointer group"
+      >
+        <div className="flex items-start justify-between mb-5">
+          <div className="w-12 h-12 rounded-2xl bg-cyan-500 text-slate-950 flex items-center justify-center shadow-[0_4px_16px_rgba(6,182,212,0.4)]">
+            <Camera className="w-6 h-6 stroke-[2.2]" />
           </div>
-          <h2 className="text-xl sm:text-2xl font-black text-white tracking-tight mt-0.5">
-            {currentLangInfo.greeting}!
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-cyan-500/15 border border-cyan-400/25 text-[11px] font-semibold text-cyan-300">
+            {currentLangInfo.name}
+          </span>
+        </div>
+
+        <div className="space-y-1 mb-4">
+          <h2 className="text-lg font-bold text-white tracking-tight">
+            {t('home.startLiveTitle')}
           </h2>
-          <p className="text-xs text-slate-400">
-            {t('home.subtitle')}
+          <p className="text-xs text-slate-300 leading-relaxed">
+            {t('home.startLiveDesc')}
           </p>
         </div>
 
-        {/* Quick Language Badge */}
-        <Badge variant="cyan" size="sm">
-          <span>{currentLangInfo.name}</span>
-        </Badge>
-      </div>
-
-      {/* Neural Engine Status Banner */}
-      <div className="p-3 rounded-2xl bg-gradient-to-r from-cyan-950/40 via-slate-900/80 to-slate-900/80 border border-cyan-500/20 text-xs text-slate-300 flex items-center justify-between shadow-md">
-        <div className="flex items-center gap-2.5">
-          <div className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_8px_#34d399]" />
-          <div className="text-[11px]">
-            <span className="font-semibold text-white">{t('status.engineReady')}: </span>
-            <span className="text-slate-400">{t('status.engineDesc')}</span>
-          </div>
+        <div className="flex items-center justify-between pt-3 border-t border-white/10">
+          <span className="text-xs font-bold text-cyan-400">
+            {t('home.startLiveBtn')}
+          </span>
+          <ChevronRight className="w-4 h-4 text-cyan-400 group-hover:translate-x-0.5 transition-transform" />
         </div>
-        <Badge variant="cyan" size="sm">
-          <span>{t('status.online')}</span>
-        </Badge>
-      </div>
+      </button>
 
-      {/* PROMINENT MAIN CARD: Start Live Session */}
-      <div
-        id="card-start-live-session"
-        onClick={startLiveSession}
-        role="button"
-        tabIndex={0}
-        aria-label={t('home.startLiveTitle')}
-        className="relative overflow-hidden p-5 sm:p-6 rounded-3xl bg-gradient-to-br from-[#0c2247] via-[#091b38] to-[#071329] border-2 border-cyan-400/40 shadow-[0_15px_35px_-10px_rgba(6,182,212,0.35)] cursor-pointer group active:scale-[0.98] transition-all"
-      >
-        {/* Glow corner accent */}
-        <div className="absolute top-0 right-0 w-36 h-36 bg-cyan-500/20 rounded-full blur-2xl pointer-events-none group-hover:bg-cyan-400/30 transition-all" />
-
-        <div className="relative z-10 flex flex-col justify-between h-full space-y-3.5">
-          <div className="flex items-center justify-between">
-            <div className="p-2.5 sm:p-3 rounded-2xl bg-cyan-500 text-slate-950 shadow-[0_0_15px_rgba(6,182,212,0.6)]">
-              <Camera className="w-5 h-5 sm:w-6 sm:h-6 stroke-[2.3]" />
-            </div>
-            <Badge variant="emerald" size="sm">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
-              <span>{t('status.liveActive')}</span>
-            </Badge>
-          </div>
-
-          <div>
-            <h3 className="text-lg sm:text-xl font-black text-white tracking-tight flex items-center gap-1.5">
-              <span>{t('home.startLiveTitle')}</span>
-              <ChevronRight className="w-4 h-4 sm:w-5 sm:h-5 text-cyan-400 group-hover:translate-x-1 transition-transform" />
-            </h3>
-            <p className="text-xs text-slate-300 mt-0.5 max-w-[280px] leading-relaxed">
-              {t('home.startLiveDesc')}
-            </p>
-          </div>
-
-          <div className="pt-2 flex items-center justify-between text-xs border-t border-white/10">
-            <span className="text-cyan-300 font-semibold flex items-center gap-1 text-[11px]">
-              <Zap className="w-3.5 h-3.5" />
-              {currentLangInfo.name}
-            </span>
-            <span className="px-3 py-1 rounded-xl bg-cyan-400 text-slate-950 font-bold text-xs shadow-md">
-              {t('home.startLiveBtn')}
-            </span>
-          </div>
-        </div>
-      </div>
-
-      {/* SECONDARY CARD: Practice & Demo Mode */}
-      <div
+      {/* Secondary Action: Guided Demo */}
+      <button
         id="card-try-demo"
         onClick={startDemoSession}
-        role="button"
-        tabIndex={0}
-        aria-label={t('home.practiceTitle')}
-        className="p-3.5 sm:p-4 rounded-2xl bg-slate-900/80 border border-cyan-500/20 hover:border-cyan-500/40 cursor-pointer active:scale-[0.98] transition-all group flex items-center justify-between shadow-lg"
+        className="w-full p-4 rounded-2xl bg-[#0c1322] border border-white/[0.08] hover:border-white/15 active:scale-[0.98] transition-all cursor-pointer flex items-center justify-between text-left group app-card-surface"
       >
-        <div className="flex items-center gap-3">
-          <div className="p-2 sm:p-2.5 rounded-xl bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-            <Play className="w-4 h-4 sm:w-5 sm:h-5 fill-indigo-400" />
+        <div className="flex items-center gap-3.5 min-w-0">
+          <div className="w-10 h-10 rounded-xl bg-slate-800/90 text-cyan-400 flex items-center justify-center shrink-0">
+            <Play className="w-4 h-4 fill-cyan-400" />
           </div>
-          <div>
-            <h4 className="text-sm font-bold text-white group-hover:text-cyan-300 transition-colors flex items-center gap-1">
-              <span>{t('home.practiceTitle')}</span>
-              <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-            </h4>
-            <p className="text-[11px] text-slate-400">
+          <div className="min-w-0">
+            <h3 className="text-sm font-semibold text-white truncate">
+              {t('home.practiceTitle')}
+            </h3>
+            <p className="text-xs text-slate-400 truncate">
               {t('home.practiceDesc')}
             </p>
           </div>
         </div>
-        <ChevronRight className="w-4 h-4 text-slate-500 group-hover:text-cyan-400 group-hover:translate-x-0.5 transition-all" />
-      </div>
+        <ChevronRight className="w-4 h-4 text-slate-500 group-hover:text-slate-300 shrink-0 ml-2" />
+      </button>
 
-      {/* LANGUAGE OUTPUT SELECTOR */}
-      <div className="p-3.5 rounded-2xl bg-slate-900/70 border border-white/10 space-y-2.5">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Languages className="w-4 h-4 text-cyan-400" />
-            <span className="text-xs font-bold text-white uppercase tracking-wider">
-              {t('home.languagesTitle')}
-            </span>
-          </div>
-          <span className="text-[10px] text-slate-400">{t('home.languagesDesc')}</span>
-        </div>
+      {/* Compact Output Language Switcher */}
+      <div className="space-y-2.5">
+        <span className="block text-[11px] font-semibold uppercase tracking-wider text-slate-400 px-0.5">
+          {t('home.languagesTitle')}
+        </span>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        <div className="flex flex-wrap gap-2">
           {Object.values(SUPPORTED_LANGUAGES).map((lang) => {
             const isSelected = selectedLanguage === lang.code;
             return (
@@ -157,57 +105,42 @@ export function HomeScreen() {
                 key={lang.code}
                 id={`btn-lang-${lang.code}`}
                 onClick={() => setLanguage(lang.code as SupportedLanguage)}
-                className={`p-2.5 rounded-xl border text-left flex items-center justify-between transition-all cursor-pointer ${
+                className={clsx(
+                  'inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-2xl border text-xs font-semibold transition-all active:scale-[0.97] cursor-pointer',
                   isSelected
-                    ? 'bg-cyan-500/15 border-cyan-400 text-white shadow-[0_0_12px_rgba(6,182,212,0.2)]'
-                    : 'bg-slate-950/60 border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700'
-                }`}
+                    ? 'bg-cyan-500/15 border-cyan-400/60 text-cyan-300'
+                    : 'bg-[#0c1322] border-white/[0.08] text-slate-300 hover:border-white/20 app-card-surface'
+                )}
                 aria-pressed={isSelected}
               >
-                <div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-xs font-bold text-white">{lang.name}</span>
-                    <span className="text-[9px] font-mono text-cyan-300/80 uppercase">
-                      [{lang.code}]
-                    </span>
-                  </div>
-                  <span className="text-[10px] text-slate-400 block truncate">
-                    {lang.region}
-                  </span>
-                </div>
-                {isSelected && (
-                  <CheckCircle2 className="w-4 h-4 text-cyan-400 shrink-0 ml-1.5" />
-                )}
+                <span>{lang.name}</span>
+                {isSelected && <Check className="w-3.5 h-3.5 text-cyan-400 stroke-[2.5]" />}
               </button>
             );
           })}
         </div>
       </div>
 
-      {/* Quick Core Capabilities Grid */}
-      <div className="grid grid-cols-2 gap-2.5 pt-0.5">
-        <div className="p-3 rounded-2xl bg-slate-900/60 border border-white/5 space-y-1">
-          <Ear className="w-3.5 h-3.5 text-indigo-400" />
-          <p className="text-xs font-semibold text-slate-200">Deaf-to-Hearing</p>
-          <p className="text-[10px] text-slate-400 leading-tight">
-            Interprets signing hands into audible Nigerian speech.
-          </p>
-        </div>
-
-        <div className="p-3 rounded-2xl bg-slate-900/60 border border-white/5 space-y-1">
-          <MessageSquare className="w-3.5 h-3.5 text-cyan-400" />
-          <p className="text-xs font-semibold text-slate-200">Regional Dialect Support</p>
-          <p className="text-[10px] text-slate-400 leading-tight">
-            Tailored Hausa, Yoruba, Igbo, and Pidgin speech for Nigerian communities.
-          </p>
-        </div>
-      </div>
-
-      {/* Privacy guarantee snippet */}
-      <div className="flex items-center justify-center gap-1.5 text-[10px] text-slate-400 pb-1">
-        <ShieldCheck className="w-3 h-3 text-cyan-400" />
-        <span>Privacy first: Designed for on-device edge processing</span>
-      </div>
+      {/* Latest Activity Shortcut (Shown only when history exists) */}
+      {latestActivity && (
+        <button
+          onClick={() => navigateToTab('activity')}
+          className="w-full px-4 py-3 rounded-2xl bg-[#0c1322] border border-white/[0.08] hover:border-white/15 active:scale-[0.98] transition-all cursor-pointer flex items-center justify-between text-left app-card-surface"
+        >
+          <div className="flex items-center gap-3 min-w-0">
+            <Clock className="w-4 h-4 text-slate-400 shrink-0" />
+            <div className="min-w-0">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 block">
+                {t('home.recentLabel')} • {SUPPORTED_LANGUAGES[latestActivity.language].name}
+              </span>
+              <p className="text-xs font-medium text-slate-200 truncate">
+                {latestActivity.translatedText}
+              </p>
+            </div>
+          </div>
+          <ChevronRight className="w-4 h-4 text-slate-500 shrink-0 ml-2" />
+        </button>
+      )}
     </div>
   );
 }

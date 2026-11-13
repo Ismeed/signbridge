@@ -15,13 +15,18 @@ function MainAppContent() {
   const { activeScreen, activeTab } = useApp();
 
   return (
-    <div className="flex flex-col min-h-screen relative w-full overflow-x-hidden">
+    <div className="flex flex-col h-full w-full overflow-hidden relative">
       {activeScreen === 'onboarding' ? (
-        <OnboardingScreen />
+        <div className="flex-1 overflow-y-auto no-scrollbar overscroll-contain">
+          <OnboardingScreen />
+        </div>
       ) : (
         <>
           <AppHeader />
-          <main className="flex-1 flex flex-col w-full">
+          <main
+            id="app-main-scroll"
+            className="flex-1 overflow-y-auto no-scrollbar overscroll-contain flex flex-col"
+          >
             {activeTab === 'home' && <HomeScreen />}
             {activeTab === 'interpret' && <InterpretScreen />}
             {activeTab === 'activity' && <ActivityScreen />}

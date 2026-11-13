@@ -40,3 +40,13 @@ export interface UserPreferences {
   fontSize: 'normal' | 'large' | 'extra-large';
   cameraPermissionConsent: boolean;
 }
+
+export interface ActivityItem {
+  id: string;
+  phraseId: string;
+  signConcept: string;
+  translatedText: string;
+  language: SupportedLanguage;
+  timestamp: number;
+  source: 'demo' | 'live';
+}

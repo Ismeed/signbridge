@@ -2,7 +2,7 @@ import React from 'react';
 import './globals.css';
 
 export const viewport = {
-  themeColor: '#060a14',
+  themeColor: '#060913',
   width: 'device-width',
   initialScale: 1,
   maximumScale: 1,
@@ -11,9 +11,9 @@ export const viewport = {
 };
 
 export const metadata = {
-  title: 'SignBridge AI | Nigerian Sign Language Translation Platform',
+  title: 'SignBridge AI | Nigerian Sign Language Translation',
   description:
-    'Bridging deaf and hearing communication through accessible sign gesture vision and multilingual Nigerian speech output.',
+    'Bridging deaf and hearing communication through local sign gesture vision and multilingual Nigerian speech output.',
   applicationName: 'SignBridge AI',
   appleWebApp: {
     capable: true,
@@ -34,7 +34,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="h-full antialiased dark">
-      <body className="min-h-full flex flex-col bg-[#060a14] text-slate-100 antialiased overflow-x-hidden selection:bg-cyan-500/30 selection:text-cyan-200">
+      <body className="min-h-full bg-[#060913] text-slate-100 antialiased overflow-x-hidden selection:bg-cyan-500/30 selection:text-cyan-200">
         {children}
       </body>
     </html>
