@@ -178,6 +178,8 @@ export async function POST(req: NextRequest) {
         },
       },
     },
+    validateData: (data) =>
+      Boolean(data.candidates?.[0]?.content?.parts?.find((part) => Boolean(part.inlineData?.data))),
   });
 
   if (!result.ok) {
@@ -185,7 +187,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: result.error }, { status: result.status });
   }
 
-  const inlineData = result.data.candidates?.[0]?.content?.parts?.[0]?.inlineData;
+  const inlineData = result.data.candidates?.[0]?.content?.parts?.find((part) =>
+    Boolean(part.inlineData?.data)
+  )?.inlineData;
   if (!inlineData?.data) {
     return NextResponse.json({ error: 'No audio returned from Gemini TTS' }, { status: 502 });
   }

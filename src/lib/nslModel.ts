@@ -4,7 +4,7 @@ import {
   NSL_SEQUENCE_LENGTH,
   resampleNslSequence,
 } from '@/lib/nslFeatures';
-import type { NslRecordedSample } from '@/lib/nslDataset';
+import { normalizeSignerTag, type NslRecordedSample } from '@/lib/nslDataset';
 
 export const NSL_MODEL_STORAGE_KEY = 'signbridge_nsl_trained_model_v1';
 export const NSL_DESCRIPTOR_DIM = NSL_FEATURE_DIM * 4;
@@ -24,6 +24,7 @@ export interface NslModelMetrics {
   valCount: number;
   trainAccuracy: number;
   valAccuracy: number;
+  splitStrategy?: 'signer-grouped' | 'stratified-clip';
   epochs: number;
   finalLoss: number;
   lossHistory: number[];
@@ -458,29 +459,59 @@ export function trainNslModel(
   const weightDecay = options.weightDecay ?? 2e-4;
   const augmentFactor = options.augmentFactor ?? 4;
 
-  // Deterministic stratified train / validation split
+  // Prefer signer-grouped validation split when >= 2 distinct named signers contributed
+  // to a class so validation measures cross-signer generalization instead of clip memorization.
   const trainRaw: Array<{ sample: NslRecordedSample; classIdx: number; descriptor: number[] }> = [];
   const valRaw: Array<{ sample: NslRecordedSample; classIdx: number; descriptor: number[] }> = [];
+  const genericSigners = new Set(['local-signer', 'anonymous']);
+  let signerSplitClassCount = 0;
 
   for (let classIdx = 0; classIdx < eligibleClasses.length; classIdx++) {
     const groupItems = [...eligibleClasses[classIdx][1].items].sort((a, b) =>
       a.createdAt.localeCompare(b.createdAt)
     );
-    const valCount = groupItems.length >= 4 ? Math.max(1, Math.round(groupItems.length * 0.25)) : 1;
-    const trainCount = groupItems.length - valCount;
 
-    for (let i = 0; i < groupItems.length; i++) {
-      const sample = groupItems[i];
+    const signerBuckets = new Map<string, NslRecordedSample[]>();
+    for (const sample of groupItems) {
+      const signerKey = normalizeSignerTag(sample.signerTag).toLowerCase();
+      if (genericSigners.has(signerKey)) continue;
+      const list = signerBuckets.get(signerKey) ?? [];
+      list.push(sample);
+      signerBuckets.set(signerKey, list);
+    }
+
+    let heldOutIds: Set<string> | null = null;
+    if (signerBuckets.size >= 2) {
+      const sortedSigners = Array.from(signerBuckets.entries()).sort((a, b) => {
+        if (a[1].length !== b[1].length) return a[1].length - b[1].length;
+        return a[0].localeCompare(b[0]);
+      });
+      const candidateVal = sortedSigners[0][1];
+      const remainingCount = groupItems.length - candidateVal.length;
+      if (remainingCount >= 1 && candidateVal.length <= Math.floor(groupItems.length * 0.5)) {
+        heldOutIds = new Set(candidateVal.map((item) => item.id));
+      }
+    }
+
+    const valIds = new Set<string>();
+    if (heldOutIds) {
+      signerSplitClassCount += 1;
+      for (const id of heldOutIds) valIds.add(id);
+    } else {
+      const valCount = groupItems.length >= 4 ? Math.max(1, Math.round(groupItems.length * 0.25)) : 1;
+      const trainCount = groupItems.length - valCount;
+      for (let i = trainCount; i < groupItems.length; i++) {
+        valIds.add(groupItems[i].id);
+      }
+    }
+
+    for (const sample of groupItems) {
       const item = {
         sample,
         classIdx,
         descriptor: extractSequenceDescriptor(sample.sequence),
       };
-      if (i < trainCount) {
-        trainRaw.push(item);
-      } else {
-        valRaw.push(item);
-      }
+      (valIds.has(sample.id) ? valRaw : trainRaw).push(item);
     }
   }
 
@@ -707,6 +738,8 @@ export function trainNslModel(
       valCount: valRaw.length,
       trainAccuracy: 0,
       valAccuracy: 0,
+      splitStrategy:
+        signerSplitClassCount === eligibleClasses.length ? 'signer-grouped' : 'stratified-clip',
       epochs,
       finalLoss: lastEpochLoss,
       lossHistory,

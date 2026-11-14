@@ -112,11 +112,13 @@ export async function callGeminiWithFallback<T>({
   models,
   payload,
   timeoutMs,
+  validateData,
 }: {
   apiKey: string;
   models: readonly string[];
   payload: Record<string, unknown>;
   timeoutMs: number;
+  validateData?: (data: T) => boolean;
 }): Promise<GeminiFallbackResult<T>> {
   const attempts: GeminiAttemptError[] = [];
 
@@ -133,7 +135,15 @@ export async function callGeminiWithFallback<T>({
 
       if (res.ok) {
         const data = (await res.json()) as T;
-        return { ok: true, model, data };
+        if (!validateData || validateData(data)) {
+          return { ok: true, model, data };
+        }
+        attempts.push({
+          model,
+          status: 502,
+          details: 'Model returned empty or malformed candidate payload',
+        });
+        continue;
       }
 
       const details = (await res.text()).slice(0, 300);

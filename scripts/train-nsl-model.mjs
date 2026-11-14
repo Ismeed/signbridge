@@ -2,11 +2,13 @@
 /**
  * Offline NSL Sequence Classifier Trainer
  *
- * Trains the on-device neural NSL model on any dataset JSON exported from
- * Settings -> NSL Training Dataset -> Export JSON.
+ * Trains the on-device neural NSL model from either:
+ *   1. An exported JSON dataset from the /collect Data Studio
+ *   2. Directly from the shared Supabase Postgres team dataset (--supabase)
  *
  * Usage:
  *   npm run train:nsl -- path/to/signbridge-nsl-dataset.json [output-model.json]
+ *   npm run train:nsl -- --supabase [output-model.json]
  */
 
 import fs from 'node:fs';
@@ -79,43 +81,93 @@ function loadTsModule(filePath) {
   return mod.exports;
 }
 
-function main() {
-  const [, , inputArg, outputArg] = process.argv;
-  if (!inputArg) {
+function loadEnvFiles() {
+  for (const filename of ['.env.local', '.env']) {
+    const filePath = path.join(REPO_ROOT, filename);
+    if (!fs.existsSync(filePath)) continue;
+    const raw = fs.readFileSync(filePath, 'utf8');
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx <= 0) continue;
+      const key = trimmed.slice(0, eqIdx).trim();
+      let val = trimmed.slice(eqIdx + 1).trim();
+      if (
+        (val.startsWith('"') && val.endsWith('"')) ||
+        (val.startsWith("'") && val.endsWith("'"))
+      ) {
+        val = val.slice(1, -1);
+      }
+      if (!(key in process.env)) {
+        process.env[key] = val;
+      }
+    }
+  }
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  const useSupabase = args.includes('--supabase');
+  const positional = args.filter((arg) => arg !== '--supabase');
+
+  if (!useSupabase && positional.length === 0) {
     console.error(
-      'Usage: node scripts/train-nsl-model.mjs <dataset.json> [public/models/nsl-model.json]'
+      'Usage:\n  node scripts/train-nsl-model.mjs <dataset.json> [public/models/nsl-model.json]\n  node scripts/train-nsl-model.mjs --supabase [public/models/nsl-model.json]'
     );
     process.exit(1);
   }
 
-  const inputPath = path.resolve(process.cwd(), inputArg);
-  if (!fs.existsSync(inputPath)) {
-    console.error(`Dataset file not found: ${inputPath}`);
-    process.exit(1);
-  }
-
+  const outputArg = useSupabase ? positional[0] : positional[1];
   const outputPath = path.resolve(
     process.cwd(),
     outputArg || path.join(REPO_ROOT, 'public', 'models', 'nsl-model.json')
   );
 
-  const { parseImportedDatasetJson, countSamplesByLabel } = loadTsModule(
+  const { parseImportedDatasetJson, countSamplesByLabel, normalizeSignerTag } = loadTsModule(
     path.join(REPO_ROOT, 'src', 'lib', 'nslDataset.ts')
   );
   const { trainNslModel, serializeModelJson } = loadTsModule(
     path.join(REPO_ROOT, 'src', 'lib', 'nslModel.ts')
   );
 
-  const rawJson = fs.readFileSync(inputPath, 'utf8');
-  const parsed = parseImportedDatasetJson(rawJson);
-  if (!parsed.ok) {
-    console.error(`Invalid dataset: ${parsed.error}`);
-    process.exit(1);
+  let samples;
+  if (useSupabase) {
+    loadEnvFiles();
+    const { isCloudDatasetConfigured, fetchAllCloudNslSamples } = loadTsModule(
+      path.join(REPO_ROOT, 'src', 'lib', 'supabaseNsl.ts')
+    );
+    if (!isCloudDatasetConfigured()) {
+      console.error(
+        'Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY (set in environment or .env.local).'
+      );
+      process.exit(1);
+    }
+    console.log('Fetching team NSL clips from Supabase...');
+    const fetched = await fetchAllCloudNslSamples();
+    samples = fetched.samples;
+  } else {
+    const inputPath = path.resolve(process.cwd(), positional[0]);
+    if (!fs.existsSync(inputPath)) {
+      console.error(`Dataset file not found: ${inputPath}`);
+      process.exit(1);
+    }
+    const rawJson = fs.readFileSync(inputPath, 'utf8');
+    const parsed = parseImportedDatasetJson(rawJson);
+    if (!parsed.ok) {
+      console.error(`Invalid dataset: ${parsed.error}`);
+      process.exit(1);
+    }
+    samples = parsed.dataset.samples;
   }
 
-  const { samples } = parsed.dataset;
   const counts = countSamplesByLabel(samples);
-  console.log(`Loaded ${samples.length} sample(s) across ${Object.keys(counts).length} label(s):`);
+  const uniqueSigners = new Set(
+    samples.map((sample) => normalizeSignerTag(sample.signerTag).toLowerCase())
+  );
+  console.log(
+    `Loaded ${samples.length} sample(s) across ${Object.keys(counts).length} label(s) from ${uniqueSigners.size} signer(s):`
+  );
   for (const [labelId, count] of Object.entries(counts)) {
     console.log(`  - ${labelId}: ${count} clip(s)`);
   }
@@ -136,7 +188,7 @@ function main() {
   console.log(`\nTraining succeeded in ${elapsedMs}ms:`);
   console.log(`  Classes (${model.classes.length}): ${model.classes.map((c) => c.name).join(', ')}`);
   console.log(
-    `  Split: ${model.metrics.trainCount} train / ${model.metrics.valCount} val (augmented 4x during training)`
+    `  Split (${model.metrics.splitStrategy ?? 'stratified-clip'}): ${model.metrics.trainCount} train / ${model.metrics.valCount} val (augmented 4x during training)`
   );
   console.log(
     `  Train Acc: ${(model.metrics.trainAccuracy * 100).toFixed(1)}% | Val Acc: ${(
@@ -146,4 +198,7 @@ function main() {
   console.log(`  Saved model weights -> ${outputPath}`);
 }
 
-main();
+main().catch((err) => {
+  console.error(err instanceof Error ? err.message : String(err));
+  process.exit(1);
+});

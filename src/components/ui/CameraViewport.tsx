@@ -21,15 +21,29 @@ interface CameraViewportProps {
   onPersonDetect?: (detected: boolean) => void;
   onTrackingFrame?: (frame: TrackingFrame, facingMode: 'user' | 'environment') => void;
   isSimulatedDemo?: boolean;
+  forceEnglish?: boolean;
 }
+
+const ENGLISH_STUDIO_LABELS: Record<string, string> = {
+  'interpret.locked': 'Tracked',
+  'interpret.scanning': 'Scanning',
+  'interpret.demo': 'Demo',
+  'interpret.standby': 'Standby',
+  'interpret.cameraOffPrompt': 'Tap Start Camera to record NSL clips.',
+  'interpret.cameraStart': 'Start Camera',
+  'interpret.cameraStop': 'Stop Camera',
+};
 
 export function CameraViewport({
   onCameraToggle,
   onPersonDetect,
   onTrackingFrame,
   isSimulatedDemo = false,
+  forceEnglish = false,
 }: CameraViewportProps) {
   const { t } = useApp();
+  const label = (key: string): string =>
+    forceEnglish && ENGLISH_STUDIO_LABELS[key] ? ENGLISH_STUDIO_LABELS[key] : t(key);
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -317,12 +331,12 @@ export function CameraViewport({
   const statusLabel = cameraActive
     ? telemetry.isPersonTracked
       ? telemetry.handsCount > 0
-        ? `${t('interpret.locked')} • ${telemetry.handsCount}H`
-        : t('interpret.locked')
-      : t('interpret.scanning')
+        ? `${label('interpret.locked')} • ${telemetry.handsCount}H`
+        : label('interpret.locked')
+      : label('interpret.scanning')
     : isSimulatedDemo
-    ? t('interpret.demo')
-    : t('interpret.standby');
+    ? label('interpret.demo')
+    : label('interpret.standby');
 
   return (
     <div
@@ -358,7 +372,7 @@ export function CameraViewport({
             <Camera className="w-6 h-6 text-slate-400" />
           </div>
           <p className="text-xs font-medium text-slate-300 max-w-[220px]">
-            {t('interpret.cameraOffPrompt')}
+            {label('interpret.cameraOffPrompt')}
           </p>
         </div>
       )}
@@ -413,17 +427,17 @@ export function CameraViewport({
               ? 'bg-rose-500/90 hover:bg-rose-500 text-white'
               : 'bg-cyan-500 hover:bg-cyan-400 text-slate-950'
           )}
-          aria-label={cameraActive ? t('interpret.cameraStop') : t('interpret.cameraStart')}
+          aria-label={cameraActive ? label('interpret.cameraStop') : label('interpret.cameraStart')}
         >
           {cameraActive ? (
             <>
               <CameraOff className="w-3.5 h-3.5" />
-              <span>{t('interpret.cameraStop')}</span>
+              <span>{label('interpret.cameraStop')}</span>
             </>
           ) : (
             <>
               <Camera className="w-3.5 h-3.5" />
-              <span>{t('interpret.cameraStart')}</span>
+              <span>{label('interpret.cameraStart')}</span>
             </>
           )}
         </button>

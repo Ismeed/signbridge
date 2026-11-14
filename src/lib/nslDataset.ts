@@ -8,6 +8,7 @@ import {
 
 export const NSL_DATASET_STORAGE_KEY = 'signbridge_nsl_dataset_v1';
 export const NSL_CUSTOM_LABELS_STORAGE_KEY = 'signbridge_nsl_labels_v1';
+export const NSL_SIGNER_TAG_STORAGE_KEY = 'signbridge_nsl_signer_tag_v1';
 
 export interface NslLabelDefinition {
   id: string;
@@ -20,6 +21,7 @@ export interface NslRecordedSample {
   id: string;
   labelId: string;
   labelName: string;
+  signerTag?: string;
   featureVersion: typeof NSL_FEATURE_VERSION;
   featureDim: number;
   sequenceLength: number;
@@ -89,7 +91,7 @@ function isValidSequenceMatrix(sequence: unknown): sequence is number[][] {
   return true;
 }
 
-function isValidRecordedSample(candidate: unknown): candidate is NslRecordedSample {
+export function isValidRecordedSample(candidate: unknown): candidate is NslRecordedSample {
   if (!candidate || typeof candidate !== 'object') return false;
   const item = candidate as Partial<NslRecordedSample>;
   return (
@@ -99,6 +101,8 @@ function isValidRecordedSample(candidate: unknown): candidate is NslRecordedSamp
     item.labelId.length > 0 &&
     typeof item.labelName === 'string' &&
     item.labelName.length > 0 &&
+    (item.signerTag === undefined ||
+      (typeof item.signerTag === 'string' && item.signerTag.length <= 64)) &&
     item.featureVersion === NSL_FEATURE_VERSION &&
     item.featureDim === NSL_FEATURE_DIM &&
     item.sequenceLength === NSL_SEQUENCE_LENGTH &&
@@ -257,9 +261,39 @@ function persistSamples(samples: NslRecordedSample[]): { ok: true } | { ok: fals
 export interface NewSamplePayload {
   labelId: string;
   labelName: string;
+  signerTag?: string;
   sequence: number[][];
   quality: NslSequenceQuality;
   cameraFacing: 'user' | 'environment';
+}
+
+export function normalizeSignerTag(raw?: string | null): string {
+  const cleaned = (raw ?? 'local-signer').trim().slice(0, 48);
+  return cleaned.length > 0 ? cleaned : 'local-signer';
+}
+
+export function loadSavedSignerTag(): string | null {
+  if (!isBrowserStorageAvailable()) return null;
+  try {
+    const val = window.localStorage.getItem(NSL_SIGNER_TAG_STORAGE_KEY)?.trim();
+    return val && val.length > 0 ? val : null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveSignerTag(tag: string): void {
+  if (!isBrowserStorageAvailable()) return;
+  try {
+    const cleaned = tag.trim().slice(0, 48);
+    if (cleaned.length > 0) {
+      window.localStorage.setItem(NSL_SIGNER_TAG_STORAGE_KEY, cleaned);
+    } else {
+      window.localStorage.removeItem(NSL_SIGNER_TAG_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage error.
+  }
 }
 
 export function saveNslSample(payload: NewSamplePayload): SaveSampleResult {
@@ -277,6 +311,7 @@ export function saveNslSample(payload: NewSamplePayload): SaveSampleResult {
     id: createSampleId(),
     labelId: payload.labelId,
     labelName: payload.labelName,
+    signerTag: normalizeSignerTag(payload.signerTag),
     featureVersion: NSL_FEATURE_VERSION,
     featureDim: NSL_FEATURE_DIM,
     sequenceLength: NSL_SEQUENCE_LENGTH,

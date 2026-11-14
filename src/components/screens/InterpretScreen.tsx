@@ -7,6 +7,7 @@ import React, {
   useCallback,
   useSyncExternalStore,
 } from 'react';
+import Link from 'next/link';
 import clsx from 'clsx';
 import {
   Volume2,
@@ -63,7 +64,6 @@ export function InterpretScreen() {
     demoModeAutoStart,
     consumeDemoAutoStart,
     addActivityItem,
-    navigateToTab,
     t,
   } = useApp();
 
@@ -559,12 +559,18 @@ export function InterpretScreen() {
               <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider gap-2">
                 <span className="text-slate-400">{currentLang.name}</span>
                 {isCameraActive && !isModelReady ? (
-                  <button
-                    onClick={() => navigateToTab('settings')}
-                    className="text-amber-300 hover:text-amber-200 transition-colors cursor-pointer"
-                  >
-                    Train NSL in Settings →
-                  </button>
+                  process.env.NEXT_PUBLIC_APP_MODE === 'consumer' ? (
+                    <span className={clsx(liveHandsVisible ? 'text-cyan-400' : 'text-slate-400')}>
+                      {liveHandsVisible ? 'Hands Tracked' : 'Show hands'}
+                    </span>
+                  ) : (
+                    <Link
+                      href="/collect"
+                      className="text-amber-300 hover:text-amber-200 transition-colors"
+                    >
+                      Collect NSL →
+                    </Link>
+                  )
                 ) : isTranslatingLive ? (
                   <span className="text-cyan-400">Translating…</span>
                 ) : stepStatusLabel ? (

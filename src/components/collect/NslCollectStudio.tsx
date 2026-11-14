@@ -1,19 +1,27 @@
 'use client';
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import Link from 'next/link';
 import clsx from 'clsx';
 import {
-  X,
-  Circle,
-  Square,
-  Download,
-  Upload,
-  Trash2,
-  Plus,
-  CheckCircle2,
   AlertCircle,
-  Hand,
+  ArrowLeft,
+  CheckCircle2,
+  Circle,
+  Cloud,
+  CloudUpload,
   Cpu,
+  Download,
+  Hand,
+  KeyRound,
+  Plus,
+  RefreshCw,
+  Share2,
+  Square,
+  Trash2,
+  Upload,
+  Users,
+  X,
 } from 'lucide-react';
 import { CameraViewport } from '@/components/ui/CameraViewport';
 import type { TrackingFrame } from '@/lib/neuralVision';
@@ -32,10 +40,14 @@ import {
   deleteNslSample,
   getAllNslLabels,
   loadNslSamples,
+  loadSavedSignerTag,
   mergeImportedDataset,
+  normalizeSignerTag,
   parseImportedDatasetJson,
   saveNslSample,
+  saveSignerTag,
   serializeDatasetJson,
+  slugifyLabel,
   type NslLabelDefinition,
   type NslRecordedSample,
 } from '@/lib/nslDataset';
@@ -52,10 +64,8 @@ import { signClassifier } from '@/lib/signClassifier';
 import { triggerHaptic } from '@/lib/speech';
 import { useApp } from '@/context/AppContext';
 
-interface NslRecorderModalProps {
-  isOpen: boolean;
-  onClose: () => void;
-  onSampleCountChange?: (count: number) => void;
+export interface NslCollectStudioProps {
+  standalone?: boolean;
 }
 
 type CapturePhase = 'idle' | 'countdown' | 'recording';
@@ -65,18 +75,55 @@ interface StatusBanner {
   message: string;
 }
 
+interface CloudSummaryState {
+  cloudConfigured: boolean;
+  collectPasscodeRequired: boolean;
+  adminPasscodeRequired: boolean;
+  totalSamples: number;
+  signersCount: number;
+  labelsSummary: Array<{ id: string; name: string; count: number }>;
+}
+
 const COUNTDOWN_SECONDS = 2;
 const RECORD_DURATION_MS = 2000;
+const MAX_CLOUD_BATCH = 25;
+const NSL_SYNCED_IDS_KEY = 'signbridge_nsl_synced_ids_v1';
 
-export function NslRecorderModal({
-  isOpen,
-  onClose,
-  onSampleCountChange,
-}: NslRecorderModalProps) {
+function loadSyncedSampleIds(): Set<string> {
+  if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') {
+    return new Set<string>();
+  }
+  try {
+    const raw = window.localStorage.getItem(NSL_SYNCED_IDS_KEY);
+    if (!raw) return new Set<string>();
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set<string>();
+    return new Set(parsed.filter((item): item is string => typeof item === 'string'));
+  } catch {
+    return new Set<string>();
+  }
+}
+
+function saveSyncedSampleIds(ids: Set<string>): void {
+  if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') return;
+  try {
+    window.localStorage.setItem(NSL_SYNCED_IDS_KEY, JSON.stringify(Array.from(ids)));
+  } catch {
+    // Ignore storage quota errors cleanly.
+  }
+}
+
+export function NslCollectStudio({ standalone = false }: NslCollectStudioProps) {
   const { preferences } = useApp();
 
   const [labels, setLabels] = useState<NslLabelDefinition[]>(() => getAllNslLabels());
   const [samples, setSamples] = useState<NslRecordedSample[]>(() => loadNslSamples());
+  const [syncedIds, setSyncedIds] = useState<Set<string>>(() => loadSyncedSampleIds());
+  const [signerInput, setSignerInput] = useState<string>(() => loadSavedSignerTag() ?? String());
+  const [accessCode, setAccessCode] = useState<string>(() => String());
+  const [cloudSummary, setCloudSummary] = useState<CloudSummaryState | null>(null);
+  const [cloudBusy, setCloudBusy] = useState<'idle' | 'syncing' | 'pulling' | 'refreshing'>('idle');
+
   const [selectedLabelId, setSelectedLabelId] = useState<string>('greeting');
   const [showAddLabel, setShowAddLabel] = useState<boolean>(false);
   const [cameraActive, setCameraActive] = useState<boolean>(false);
@@ -92,13 +139,13 @@ export function NslRecorderModal({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const modelFileInputRef = useRef<HTMLInputElement>(null);
 
-  // High-frequency capture buffers stored in refs to avoid 60Hz React re-renders.
   const isRecordingRef = useRef<boolean>(false);
   const rawFeaturesRef = useRef<NslFrameFeatures[]>([]);
   const rawVectorsRef = useRef<number[][]>([]);
   const prevFrameRef = useRef<TrackingFrame | null>(null);
   const recordStartPerfRef = useRef<number>(0);
   const facingModeRef = useRef<'user' | 'environment'>('user');
+  const signerInputRef = useRef<string>(signerInput);
   const selectedLabelRef = useRef<{ id: string; name: string }>({
     id: 'greeting',
     name: 'Greeting & Peace',
@@ -118,6 +165,42 @@ export function NslRecorderModal({
       selectedLabelRef.current = { id: selectedLabel.id, name: selectedLabel.name };
     }
   }, [selectedLabel]);
+
+  useEffect(() => {
+    signerInputRef.current = signerInput;
+  }, [signerInput]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/nsl/samples?mode=summary', { cache: 'no-store' })
+      .then(async (res) => {
+        if (!res.ok || cancelled) return;
+        const data = (await res.json()) as CloudSummaryState;
+        if (!cancelled) {
+          setCloudSummary(data);
+        }
+      })
+      .catch(() => {
+        // Offline mode: local capture and JSON export remain functional.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const refreshCloudSummary = useCallback(async () => {
+    setCloudBusy('refreshing');
+    try {
+      const res = await fetch('/api/nsl/samples?mode=summary', { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = (await res.json()) as CloudSummaryState;
+      setCloudSummary(data);
+    } catch {
+      // Ignore transient network errors cleanly.
+    } finally {
+      setCloudBusy('idle');
+    }
+  }, []);
 
   const clearActiveTimers = useCallback(() => {
     if (countdownTimerRef.current) {
@@ -185,9 +268,11 @@ export function NslRecorderModal({
 
     const resampled = resampleNslSequence(capturedVectors, NSL_SEQUENCE_LENGTH);
     const activeLabel = selectedLabelRef.current;
+    const currentSigner = signerInputRef.current.trim();
     const result = saveNslSample({
       labelId: activeLabel.id,
       labelName: activeLabel.name,
+      signerTag: currentSigner.length > 0 ? currentSigner : undefined,
       sequence: resampled,
       quality,
       cameraFacing: facingModeRef.current,
@@ -199,15 +284,14 @@ export function NslRecorderModal({
     }
 
     setSamples(result.samples);
-    onSampleCountChange?.(result.samples.length);
     triggerHaptic('heavy', preferences.hapticsEnabled);
 
     const coveragePct = Math.round(quality.handCoverageRatio * 100);
     setStatusBanner({
       tone: 'success',
-      message: `Saved "${activeLabel.name}" (${quality.rawFrameCount} frames -> ${NSL_SEQUENCE_LENGTH}x${resampled[0].length}, ${coveragePct}% hands).`,
+      message: `Saved "${activeLabel.name}" (${quality.rawFrameCount}f -> ${NSL_SEQUENCE_LENGTH}x${resampled[0].length}, ${coveragePct}% hands).`,
     });
-  }, [clearActiveTimers, onSampleCountChange, preferences.hapticsEnabled]);
+  }, [clearActiveTimers, preferences.hapticsEnabled]);
 
   const beginRecordingWindow = useCallback(() => {
     rawFeaturesRef.current = [];
@@ -292,9 +376,15 @@ export function NslRecorderModal({
     []
   );
 
+  const handleSignerChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setSignerInput(val);
+    saveSignerTag(val);
+  };
+
   const handleAddCustomLabel = (e: React.FormEvent) => {
     e.preventDefault();
-    const rawValue = customInputRef.current?.value ?? ' ';
+    const rawValue = customInputRef.current?.value ?? String();
     const added = addCustomNslLabel(rawValue, 'Custom');
     if (!added) {
       setStatusBanner({
@@ -315,7 +405,12 @@ export function NslRecorderModal({
   const handleDeleteSample = (id: string) => {
     const updated = deleteNslSample(id);
     setSamples(updated);
-    onSampleCountChange?.(updated.length);
+    if (syncedIds.has(id)) {
+      const next = new Set(syncedIds);
+      next.delete(id);
+      setSyncedIds(next);
+      saveSyncedSampleIds(next);
+    }
   };
 
   const handleClearDataset = () => {
@@ -326,8 +421,10 @@ export function NslRecorderModal({
     clearNslDataset();
     setSamples([]);
     setConfirmClear(false);
-    onSampleCountChange?.(0);
-    setStatusBanner({ tone: 'info', message: 'All recorded NSL clips cleared from this device.' });
+    const emptySet = new Set<string>();
+    setSyncedIds(emptySet);
+    saveSyncedSampleIds(emptySet);
+    setStatusBanner({ tone: 'info', message: 'All local NSL clips cleared from this browser.' });
   };
 
   const triggerJsonDownload = (filename: string, jsonContent: string) => {
@@ -342,20 +439,234 @@ export function NslRecorderModal({
     URL.revokeObjectURL(url);
   };
 
-  const handleExportJson = () => {
+  const handleShareOrExportJson = async () => {
     if (samples.length === 0) return;
     const dateStamp = new Date().toISOString().slice(0, 10);
-    triggerJsonDownload(
-      `signbridge-nsl-dataset-${dateStamp}.json`,
-      serializeDatasetJson(samples, labels)
-    );
+    const signerSlug = slugifyLabel(signerInput.trim().length > 0 ? signerInput : 'contributor');
+    const filename = `signbridge-nsl-${signerSlug}-${dateStamp}.json`;
+    const jsonContent = serializeDatasetJson(samples, labels);
+
+    if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+      try {
+        const file = new File([jsonContent], filename, { type: 'application/json' });
+        const canShareFile =
+          typeof navigator.canShare === 'function' ? navigator.canShare({ files: [file] }) : true;
+        if (canShareFile) {
+          await navigator.share({
+            files: [file],
+            title: 'SignBridge NSL Clips',
+            text: `${samples.length} NSL clips from ${normalizeSignerTag(signerInput)}`,
+          });
+          setStatusBanner({
+            tone: 'success',
+            message: `Shared ${samples.length} NSL clip(s) as ${filename}.`,
+          });
+          return;
+        }
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          return;
+        }
+      }
+    }
+
+    triggerJsonDownload(filename, jsonContent);
     setStatusBanner({
       tone: 'success',
       message: `Exported ${samples.length} labeled NSL clip(s) as JSON.`,
     });
   };
 
-  const handleTrainModel = () => {
+  const unsyncedSamples = useMemo(
+    () => samples.filter((sample) => !syncedIds.has(sample.id)),
+    [samples, syncedIds]
+  );
+
+  const handleSubmitToCloud = async () => {
+    if (unsyncedSamples.length === 0 || cloudBusy !== 'idle') return;
+
+    const cleanedSigner = signerInput.trim();
+    if (cleanedSigner.length < 2) {
+      setStatusBanner({
+        tone: 'error',
+        message:
+          'Enter your Contributor Name (2+ characters) above before uploading clips to the team database.',
+      });
+      return;
+    }
+
+    if (cloudSummary?.collectPasscodeRequired && accessCode.trim().length === 0) {
+      setStatusBanner({
+        tone: 'error',
+        message: 'Enter the Team Access Code to upload clips to the shared team database.',
+      });
+      return;
+    }
+
+    const normalizedSigner = normalizeSignerTag(cleanedSigner);
+    saveSignerTag(normalizedSigner);
+    setCloudBusy('syncing');
+
+    const updatedSynced = new Set(syncedIds);
+    let totalUploaded = 0;
+
+    try {
+      for (let i = 0; i < unsyncedSamples.length; i += MAX_CLOUD_BATCH) {
+        const batch = unsyncedSamples.slice(i, i + MAX_CLOUD_BATCH).map((sample) => ({
+          ...sample,
+          signerTag:
+            sample.signerTag && sample.signerTag !== 'local-signer'
+              ? sample.signerTag
+              : normalizedSigner,
+        }));
+
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+        };
+        if (accessCode.trim().length > 0) {
+          headers['x-nsl-passcode'] = accessCode.trim();
+        }
+
+        const res = await fetch('/api/nsl/samples', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            signerTag: normalizedSigner,
+            samples: batch,
+          }),
+        });
+
+        const payload = (await res.json()) as {
+          error?: string;
+          totalCloudCount?: number;
+          signersCount?: number;
+        };
+
+        if (!res.ok) {
+          setStatusBanner({
+            tone: 'error',
+            message: payload.error ?? `Upload failed with HTTP ${res.status}.`,
+          });
+          setSyncedIds(updatedSynced);
+          saveSyncedSampleIds(updatedSynced);
+          setCloudBusy('idle');
+          return;
+        }
+
+        for (const item of batch) {
+          updatedSynced.add(item.id);
+        }
+        totalUploaded += batch.length;
+        saveSyncedSampleIds(updatedSynced);
+      }
+
+      setSyncedIds(updatedSynced);
+      triggerHaptic('heavy', preferences.hapticsEnabled);
+      await refreshCloudSummary();
+      setStatusBanner({
+        tone: 'success',
+        message: `Uploaded ${totalUploaded} clip(s) as "${normalizedSigner}" to the team dataset.`,
+      });
+    } catch {
+      setSyncedIds(updatedSynced);
+      saveSyncedSampleIds(updatedSynced);
+      setStatusBanner({
+        tone: 'error',
+        message: 'Network error while uploading. Clips remain safely queued locally.',
+      });
+    } finally {
+      setCloudBusy('idle');
+    }
+  };
+
+  const handlePullTeamAndTrain = async () => {
+    if (cloudBusy !== 'idle') return;
+    if (cloudSummary?.adminPasscodeRequired && accessCode.trim().length === 0) {
+      setStatusBanner({
+        tone: 'error',
+        message: 'Enter the Team Lead passcode in Access Code to pull the full team dataset.',
+      });
+      return;
+    }
+
+    setCloudBusy('pulling');
+    try {
+      const headers: Record<string, string> = {};
+      if (accessCode.trim().length > 0) {
+        headers['x-nsl-passcode'] = accessCode.trim();
+      }
+
+      const res = await fetch('/api/nsl/samples?mode=export', {
+        headers,
+        cache: 'no-store',
+      });
+
+      const rawText = await res.text();
+      if (!res.ok) {
+        let errMessage = `Team dataset pull failed (HTTP ${res.status}).`;
+        try {
+          const parsedErr = JSON.parse(rawText) as { error?: string };
+          if (parsedErr.error) errMessage = parsedErr.error;
+        } catch {
+          // Keep HTTP fallback message.
+        }
+        setStatusBanner({ tone: 'error', message: errMessage });
+        return;
+      }
+
+      const parsed = parseImportedDatasetJson(rawText);
+      if (!parsed.ok) {
+        setStatusBanner({ tone: 'error', message: parsed.error });
+        return;
+      }
+
+      const combinedById = new Map<string, NslRecordedSample>();
+      for (const sample of parsed.dataset.samples) {
+        combinedById.set(sample.id, sample);
+      }
+      for (const localSample of samples) {
+        if (!combinedById.has(localSample.id)) {
+          combinedById.set(localSample.id, localSample);
+        }
+      }
+
+      const combinedSamples = Array.from(combinedById.values());
+      const trained = trainNslModel(combinedSamples);
+      if (!trained.ok) {
+        setStatusBanner({ tone: 'error', message: trained.error });
+        return;
+      }
+
+      const saved = saveTrainedModel(trained.model);
+      if (!saved.ok) {
+        setStatusBanner({ tone: 'error', message: saved.error });
+        return;
+      }
+
+      signClassifier.setModel(trained.model);
+      setTrainedModel(trained.model);
+      triggerHaptic('heavy', preferences.hapticsEnabled);
+
+      const valPct = Math.round(trained.model.metrics.valAccuracy * 100);
+      const splitLabel =
+        trained.model.metrics.splitStrategy === 'signer-grouped'
+          ? 'unseen-signer val'
+          : 'clip-split val';
+      setStatusBanner({
+        tone: 'success',
+        message: `Trained team model on ${combinedSamples.length} clips across ${trained.model.classes.length} signs (${valPct}% ${splitLabel}).`,
+      });
+    } catch {
+      setStatusBanner({
+        tone: 'error',
+        message: 'Failed fetching or training on team dataset.',
+      });
+    } finally {
+      setCloudBusy('idle');
+    }
+  };
+
+  const handleTrainLocalModel = () => {
     const result = trainNslModel(samples);
     if (!result.ok) {
       setStatusBanner({ tone: 'error', message: result.error });
@@ -373,7 +684,7 @@ export function NslRecorderModal({
     const trainPct = Math.round(result.model.metrics.trainAccuracy * 100);
     setStatusBanner({
       tone: 'success',
-      message: `Trained NSL model on ${result.model.classes.length} signs (Val ${valPct}%, Train ${trainPct}%).`,
+      message: `Trained local model on ${result.model.classes.length} signs (Val ${valPct}%, Train ${trainPct}%).`,
     });
   };
 
@@ -419,7 +730,7 @@ export function NslRecorderModal({
     clearTrainedModel();
     signClassifier.setModel(null);
     setTrainedModel(null);
-    setStatusBanner({ tone: 'info', message: 'Cleared on-device NSL model weights.' });
+    setStatusBanner({ tone: 'info', message: 'Cleared browser NSL model weights.' });
   };
 
   const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -441,10 +752,9 @@ export function NslRecorderModal({
       }
       setSamples(merged.samples);
       setLabels(merged.labels);
-      onSampleCountChange?.(merged.totalCount);
       setStatusBanner({
         tone: 'success',
-        message: `Imported ${merged.addedCount} new clip(s) (${merged.totalCount} total).`,
+        message: `Imported ${merged.addedCount} new clip(s) (${merged.totalCount} total local).`,
       });
     } catch {
       setStatusBanner({ tone: 'error', message: 'Failed to read selected JSON file.' });
@@ -452,6 +762,14 @@ export function NslRecorderModal({
   };
 
   const countsByLabel = useMemo(() => countSamplesByLabel(samples), [samples]);
+  const cloudCountByLabel = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const item of cloudSummary?.labelsSummary ?? []) {
+      map[item.id] = item.count;
+    }
+    return map;
+  }, [cloudSummary]);
+
   const coveredLabelsCount = useMemo(
     () => labels.filter((label) => (countsByLabel[label.id] ?? 0) > 0).length,
     [labels, countsByLabel]
@@ -461,44 +779,164 @@ export function NslRecorderModal({
     [countsByLabel]
   );
 
-  if (!isOpen) return null;
+  const cloudConfigured = cloudSummary?.cloudConfigured ?? false;
+  const showPasscodeField =
+    cloudConfigured &&
+    ((cloudSummary?.collectPasscodeRequired ?? false) ||
+      (cloudSummary?.adminPasscodeRequired ?? false));
 
   return (
-    <div
-      className="fixed inset-0 z-50 bg-[#060913]/95 backdrop-blur-md overflow-y-auto"
-      role="dialog"
-      aria-modal="true"
-      aria-label="NSL Dataset Recorder"
-    >
-      <div className="max-w-md mx-auto w-full px-4 py-4 pb-10 space-y-4">
-        {/* Header */}
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <h2 className="text-lg font-extrabold text-white tracking-tight">
-              NSL Sign Recorder
-            </h2>
-            <p className="text-[11px] text-slate-400">
-              {samples.length} clips saved • {coveredLabelsCount}/{labels.length} signs ready
+    <div className="min-h-dvh bg-[#060913] text-slate-100">
+      <div className="max-w-lg mx-auto w-full px-4 py-5 pb-14 space-y-4">
+        {/* Studio Header */}
+        <header className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="px-2 py-0.5 rounded-full bg-cyan-500/15 border border-cyan-400/30 text-[10px] font-bold uppercase tracking-wider text-cyan-300">
+                Team Collector
+              </span>
+              {cloudConfigured && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-400/30 text-[10px] font-semibold text-emerald-300">
+                  <Cloud className="w-3 h-3" />
+                  <span>Cloud Connected</span>
+                </span>
+              )}
+            </div>
+            <h1 className="mt-1.5 text-xl font-extrabold text-white tracking-tight">
+              SignBridge NSL Data Studio
+            </h1>
+            <p className="text-xs text-slate-400">
+              {samples.length} local clip(s) • {coveredLabelsCount}/{labels.length} signs recorded
             </p>
           </div>
-          <button
-            onClick={() => {
-              resetCaptureState();
-              setCameraActive(false);
-              setHandsVisibleLive(false);
-              onClose();
-            }}
-            className="p-2 rounded-xl bg-white/[0.06] border border-white/10 text-slate-300 hover:text-white cursor-pointer"
-            aria-label="Close NSL Sign Recorder"
+
+          {!standalone && (
+            <Link
+              href="/"
+              className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white/[0.06] border border-white/10 text-xs font-semibold text-slate-200 hover:bg-white/[0.12] transition-colors"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>App</span>
+            </Link>
+          )}
+        </header>
+
+        {/* Contributor Identity & Shared Team Sync Bar */}
+        <section className="rounded-2xl bg-[#0c1322] border border-white/[0.08] p-3.5 space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Users className="w-4 h-4 text-cyan-400" />
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-300">
+                Contributor & Team Sync
+              </span>
+            </div>
+            {cloudConfigured && (
+              <button
+                onClick={refreshCloudSummary}
+                disabled={cloudBusy !== 'idle'}
+                className="inline-flex items-center gap-1 text-[11px] text-slate-400 hover:text-cyan-300 cursor-pointer"
+                aria-label="Refresh team database summary"
+              >
+                <RefreshCw className={clsx('w-3 h-3', cloudBusy === 'refreshing' && 'animate-spin')} />
+                <span>Refresh</span>
+              </button>
+            )}
+          </div>
+
+          <div
+            className={clsx(
+              'grid gap-2 items-end',
+              showPasscodeField ? 'grid-cols-2' : 'grid-cols-1'
+            )}
           >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
+            <label className="block space-y-1">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 min-h-4 flex items-center">
+                Contributor / Signer Name
+              </span>
+              <input
+                id="input-signer-tag"
+                type="text"
+                value={signerInput}
+                onChange={handleSignerChange}
+                placeholder="e.g. Amina (Lagos)"
+                maxLength={48}
+                className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-white/10 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-cyan-500"
+              />
+            </label>
+
+            {showPasscodeField && (
+              <label className="block space-y-1">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 min-h-4 flex items-center gap-1">
+                  <KeyRound className="w-3 h-3 text-amber-400" />
+                  <span>Team Access Code</span>
+                </span>
+                <input
+                  id="input-team-passcode"
+                  type="password"
+                  value={accessCode}
+                  onChange={(e) => setAccessCode(e.target.value)}
+                  placeholder="Team code"
+                  className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-white/10 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-cyan-500"
+                />
+              </label>
+            )}
+          </div>
+
+          {cloudConfigured ? (
+            <div className="space-y-2.5">
+              <div className="flex items-center justify-between px-3 py-2 rounded-xl bg-slate-950/75 border border-white/[0.06] text-xs">
+                <span className="text-slate-300">
+                  Team DB:{' '}
+                  <strong className="text-white">{cloudSummary?.totalSamples ?? 0}</strong> clips •{' '}
+                  <strong className="text-cyan-300">{cloudSummary?.signersCount ?? 0}</strong>{' '}
+                  signer(s)
+                </span>
+                <span
+                  className={clsx(
+                    'text-[11px] font-semibold',
+                    unsyncedSamples.length > 0 ? 'text-amber-300' : 'text-emerald-300'
+                  )}
+                >
+                  {unsyncedSamples.length > 0
+                    ? `${unsyncedSamples.length} unsynced`
+                    : 'All synced'}
+                </span>
+              </div>
+
+              <button
+                id="btn-submit-cloud"
+                onClick={handleSubmitToCloud}
+                disabled={unsyncedSamples.length === 0 || cloudBusy !== 'idle'}
+                className={clsx(
+                  'w-full py-2.5 px-4 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-colors',
+                  unsyncedSamples.length > 0 && cloudBusy === 'idle'
+                    ? 'bg-cyan-500 hover:bg-cyan-400 text-slate-950 cursor-pointer shadow-md shadow-cyan-500/15'
+                    : 'bg-slate-900/70 border border-white/[0.06] text-slate-500 cursor-not-allowed'
+                )}
+              >
+                <CloudUpload className="w-4 h-4" />
+                <span>
+                  {cloudBusy === 'syncing'
+                    ? 'Uploading Clips to Team DB...'
+                    : unsyncedSamples.length > 0
+                    ? `Submit ${unsyncedSamples.length} Clip(s) to Team DB`
+                    : 'No New Local Clips to Upload'}
+                </span>
+              </button>
+            </div>
+          ) : (
+            <p className="text-[11px] text-slate-400">
+              Offline/JSON mode active. Record clips cleanly below and tap Share/Export JSON to
+              send your batch to the team lead.
+            </p>
+          )}
+        </section>
 
         {/* Camera Preview + Live Capture Overlay */}
         <div className="relative">
           <CameraViewport
             state={capturePhase === 'recording' ? 'tracking' : cameraActive ? 'ready' : 'idle'}
+            forceEnglish
             onCameraToggle={handleCameraToggle}
             onTrackingFrame={handleTrackingFrame}
           />
@@ -508,9 +946,7 @@ export function NslRecorderModal({
               <span className="text-[11px] font-bold uppercase tracking-widest text-cyan-300 mb-1">
                 Get Ready
               </span>
-              <span className="text-6xl font-black text-white tabular-nums">
-                {countdownLeft}
-              </span>
+              <span className="text-6xl font-black text-white tabular-nums">{countdownLeft}</span>
             </div>
           )}
 
@@ -553,7 +989,7 @@ export function NslRecorderModal({
             {capturePhase === 'idle' ? (
               <>
                 <Circle className="w-4 h-4 fill-current" />
-                <span>Record 2s Clip</span>
+                <span>Record 2s Clip ({selectedLabel?.name ?? 'NSL Sign'})</span>
               </>
             ) : capturePhase === 'countdown' ? (
               <>
@@ -607,8 +1043,7 @@ export function NslRecorderModal({
                 'bg-emerald-950/60 border-emerald-500/35 text-emerald-200',
               statusBanner.tone === 'error' &&
                 'bg-rose-950/60 border-rose-500/35 text-rose-200',
-              statusBanner.tone === 'info' &&
-                'bg-cyan-950/60 border-cyan-500/35 text-cyan-200'
+              statusBanner.tone === 'info' && 'bg-cyan-950/60 border-cyan-500/35 text-cyan-200'
             )}
           >
             {statusBanner.tone === 'error' ? (
@@ -654,7 +1089,8 @@ export function NslRecorderModal({
 
           <div className="flex flex-wrap gap-1.5">
             {labels.map((label) => {
-              const count = countsByLabel[label.id] ?? 0;
+              const localCount = countsByLabel[label.id] ?? 0;
+              const teamCount = cloudCountByLabel[label.id] ?? 0;
               const isSelected = selectedLabel?.id === label.id;
               return (
                 <button
@@ -671,29 +1107,31 @@ export function NslRecorderModal({
                   <span
                     className={clsx(
                       'px-1.5 py-0.5 rounded-md text-[10px] font-mono',
-                      count >= 5
+                      localCount + teamCount >= 5
                         ? 'bg-emerald-500/20 text-emerald-300'
-                        : count > 0
+                        : localCount + teamCount > 0
                         ? 'bg-cyan-500/20 text-cyan-300'
                         : 'bg-white/[0.06] text-slate-500'
                     )}
                   >
-                    {count}
+                    {cloudConfigured ? `${localCount}/${teamCount}` : localCount}
                   </span>
                 </button>
               );
             })}
           </div>
           <p className="text-[11px] text-slate-500">
-            Aim for 5+ varied clips per sign before training the NSL classifier.
+            {cloudConfigured
+              ? 'Badge shows local / team DB clips. Aim for 5+ clips per sign across multiple contributors.'
+              : 'Aim for 5+ varied clips per sign before training or exporting.'}
           </p>
         </section>
 
-        {/* Export / Import / Manage */}
+        {/* Share / Export / Import / Manage Clips */}
         <section className="rounded-2xl bg-[#0c1322] border border-white/[0.08] p-3.5 space-y-3">
           <div className="grid grid-cols-2 gap-2">
             <button
-              onClick={handleExportJson}
+              onClick={handleShareOrExportJson}
               disabled={samples.length === 0}
               className={clsx(
                 'py-2.5 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer',
@@ -702,8 +1140,8 @@ export function NslRecorderModal({
                   : 'bg-slate-900/60 border-white/[0.06] text-slate-600 cursor-not-allowed'
               )}
             >
-              <Download className="w-3.5 h-3.5" />
-              <span>Export JSON</span>
+              <Share2 className="w-3.5 h-3.5" />
+              <span>Share / Export JSON</span>
             </button>
 
             <button
@@ -726,7 +1164,7 @@ export function NslRecorderModal({
             <div className="space-y-2 pt-1 border-t border-white/[0.06]">
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                  Recent Clips ({samples.length})
+                  Local Clips ({samples.length})
                 </span>
                 <button
                   onClick={handleClearDataset}
@@ -739,40 +1177,50 @@ export function NslRecorderModal({
                 </button>
               </div>
 
-              <div className="max-h-40 overflow-y-auto space-y-1.5 pr-1">
-                {samples.slice(0, 12).map((sample) => (
-                  <div
-                    key={sample.id}
-                    className="px-2.5 py-2 rounded-xl bg-slate-950/70 border border-white/[0.06] flex items-center justify-between gap-2 text-xs"
-                  >
-                    <div className="min-w-0">
-                      <p className="font-semibold text-white truncate">{sample.labelName}</p>
-                      <p className="text-[10px] text-slate-400">
-                        {sample.rawFrameCount}f • {Math.round(sample.durationMs / 100) / 10}s •{' '}
-                        {Math.round(sample.handCoverageRatio * 100)}% hands ({sample.handedness})
-                      </p>
-                    </div>
-                    <button
-                      onClick={() => handleDeleteSample(sample.id)}
-                      className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 cursor-pointer shrink-0"
-                      aria-label={`Delete clip for ${sample.labelName}`}
+              <div className="max-h-44 overflow-y-auto space-y-1.5 pr-1">
+                {samples.slice(0, 16).map((sample) => {
+                  const isSynced = syncedIds.has(sample.id);
+                  return (
+                    <div
+                      key={sample.id}
+                      className="px-2.5 py-2 rounded-xl bg-slate-950/70 border border-white/[0.06] flex items-center justify-between gap-2 text-xs"
                     >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                ))}
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <p className="font-semibold text-white truncate">{sample.labelName}</p>
+                          {isSynced && (
+                            <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-[9px] font-bold uppercase text-emerald-300">
+                              Synced
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[10px] text-slate-400 truncate">
+                          {normalizeSignerTag(sample.signerTag)} • {sample.rawFrameCount}f •{' '}
+                          {Math.round(sample.handCoverageRatio * 100)}% hands
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => handleDeleteSample(sample.id)}
+                        className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 cursor-pointer shrink-0"
+                        aria-label={`Delete clip for ${sample.labelName}`}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
         </section>
 
-        {/* On-Device Model Training */}
+        {/* Model Training & Weight Distribution */}
         <section className="rounded-2xl bg-[#0c1322] border border-white/[0.08] p-3.5 space-y-3">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <Cpu className="w-4 h-4 text-cyan-400" />
               <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-300">
-                On-Device NSL Model
+                NSL Model Training
               </span>
             </div>
             {trainedModel ? (
@@ -790,6 +1238,9 @@ export function NslRecorderModal({
                 Val {Math.round(trainedModel.metrics.valAccuracy * 100)}% • Train{' '}
                 {Math.round(trainedModel.metrics.trainAccuracy * 100)}% •{' '}
                 {trainedModel.metrics.sampleCount} clips
+                {trainedModel.metrics.splitStrategy === 'signer-grouped'
+                  ? ' • Signer-Grouped Val'
+                  : ' • Clip-Split Val'}
               </p>
               <p className="text-[10px] text-slate-400 truncate">
                 Classes: {trainedModel.classes.map((c) => c.name).join(', ')}
@@ -797,24 +1248,50 @@ export function NslRecorderModal({
             </div>
           ) : (
             <p className="text-[11px] text-slate-400">
-              Train directly on your recorded clips ({trainableClassesCount}/2+ ready signs with 2+ clips each).
+              Train directly on local clips ({trainableClassesCount}/2+ signs with 2+ clips each) or
+              pull the full team dataset from cloud.
             </p>
           )}
 
-          <button
-            id="btn-train-nsl-model"
-            onClick={handleTrainModel}
-            disabled={trainableClassesCount < 2}
-            className={clsx(
-              'w-full py-2.5 px-4 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer',
-              trainableClassesCount >= 2
-                ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-md shadow-emerald-500/15'
-                : 'bg-slate-900/70 border border-white/[0.06] text-slate-500 cursor-not-allowed'
+          <div className="space-y-2">
+            {cloudConfigured && (
+              <button
+                id="btn-pull-team-train"
+                onClick={handlePullTeamAndTrain}
+                disabled={cloudBusy !== 'idle' || (cloudSummary?.totalSamples ?? 0) < 4}
+                className={clsx(
+                  'w-full py-2.5 px-4 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-colors',
+                  cloudBusy === 'idle' && (cloudSummary?.totalSamples ?? 0) >= 4
+                    ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950 cursor-pointer shadow-md shadow-emerald-500/15'
+                    : 'bg-slate-900/70 border border-white/[0.06] text-slate-500 cursor-not-allowed'
+                )}
+              >
+                <Cloud className="w-3.5 h-3.5" />
+                <span>
+                  {cloudBusy === 'pulling'
+                    ? 'Pulling Team Dataset & Training...'
+                    : 'Pull Team Dataset & Train Model'}
+                </span>
+              </button>
             )}
-          >
-            <Cpu className="w-3.5 h-3.5" />
-            <span>{trainedModel ? 'Retrain NSL Model' : 'Train NSL Model'}</span>
-          </button>
+
+            <button
+              id="btn-train-nsl-model"
+              onClick={handleTrainLocalModel}
+              disabled={trainableClassesCount < 2}
+              className={clsx(
+                'w-full py-2.5 px-4 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-colors',
+                trainableClassesCount >= 2
+                  ? cloudConfigured
+                    ? 'bg-white/[0.07] hover:bg-white/[0.12] border border-white/10 text-white cursor-pointer'
+                    : 'bg-emerald-500 hover:bg-emerald-400 text-slate-950 cursor-pointer shadow-md shadow-emerald-500/15'
+                  : 'bg-slate-900/70 border border-white/[0.06] text-slate-500 cursor-not-allowed'
+              )}
+            >
+              <Cpu className="w-3.5 h-3.5" />
+              <span>{trainedModel ? 'Retrain on Local Clips' : 'Train on Local Clips'}</span>
+            </button>
+          </div>
 
           <div className="flex items-center gap-2">
             <button

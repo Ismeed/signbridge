@@ -31,6 +31,7 @@ interface GeminiTextResponse {
     content?: {
       parts?: Array<{
         text?: string;
+        thought?: boolean;
       }>;
     };
   }>;
@@ -46,6 +47,16 @@ function stripOuterQuotes(value: string): string {
     }
   }
   return trimmed;
+}
+
+function extractTranslatedText(data: GeminiTextResponse): string {
+  const candidateParts = data.candidates?.[0]?.content?.parts ?? [];
+  return candidateParts
+    .filter((part) => !part.thought && typeof part.text === 'string')
+    .map((part) => part.text?.trim() ?? String())
+    .filter((segment) => segment.length > 0)
+    .join(' ')
+    .trim();
 }
 
 export async function POST(req: NextRequest) {
@@ -132,6 +143,7 @@ export async function POST(req: NextRequest) {
   const prompt = `You are a translator for SignBridge AI, a Nigerian Sign Language assistive communication app.
 Translate the following text from ${TARGET_LANGUAGE_INSTRUCTIONS[sourceLang]} into ${TARGET_LANGUAGE_INSTRUCTIONS[targetLang]}.
 Keep the translation concise, respectful, and natural for spoken conversation in Nigeria.
+Never echo the untranslated source text when target language differs from source language.
 Respond ONLY with the translated text, without quotation marks, labels, or explanations.
 
 Text to translate:
@@ -146,9 +158,10 @@ ${cleanText}`;
       contents: [{ parts: [{ text: prompt }] }],
       generationConfig: {
         temperature: 0.1,
-        maxOutputTokens: 256,
+        maxOutputTokens: 512,
       },
     },
+    validateData: (data) => extractTranslatedText(data).length > 0,
   });
 
   if (!result.ok) {
@@ -159,9 +172,11 @@ ${cleanText}`;
     );
   }
 
-  const rawTranslated = result.data.candidates?.[0]?.content?.parts?.[0]?.text;
-  const translatedText = rawTranslated ? stripOuterQuotes(rawTranslated) : cleanText;
-  translationCache.set(cacheKey, translatedText);
+  const rawTranslated = extractTranslatedText(result.data);
+  const translatedText = rawTranslated.length > 0 ? stripOuterQuotes(rawTranslated) : cleanText;
+  if (rawTranslated.length > 0) {
+    translationCache.set(cacheKey, translatedText);
+  }
 
   return NextResponse.json({
     translatedText,
