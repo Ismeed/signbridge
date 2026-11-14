@@ -1,6 +1,12 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, {
+  useState,
+  useEffect,
+  useRef,
+  useCallback,
+  useSyncExternalStore,
+} from 'react';
 import clsx from 'clsx';
 import {
   Volume2,
@@ -27,6 +33,10 @@ import {
   triggerHaptic,
   PlaybackState,
 } from '@/lib/speech';
+import type { TrackingFrame } from '@/lib/neuralVision';
+import { getNslModelSnapshot, subscribeNslModel } from '@/lib/nslModel';
+import { signClassifier, type SignClassificationResult } from '@/lib/signClassifier';
+import { TranslationService } from '@/lib/translationClient';
 
 export type GuidedDemoStep =
   | 'ready'
@@ -36,6 +46,16 @@ export type GuidedDemoStep =
   | 'speaking'
   | 'complete';
 
+interface LiveRecognitionDisplay {
+  phraseId: string;
+  signConcept: string;
+  translatedText: string;
+  phoneticGuide?: string;
+  signDescription?: string;
+  language: SupportedLanguage;
+  confidence: number;
+}
+
 export function InterpretScreen() {
   const {
     selectedLanguage,
@@ -43,8 +63,16 @@ export function InterpretScreen() {
     demoModeAutoStart,
     consumeDemoAutoStart,
     addActivityItem,
+    navigateToTab,
     t,
   } = useApp();
+
+  const activeNslModel = useSyncExternalStore(
+    subscribeNslModel,
+    getNslModelSnapshot,
+    () => null
+  );
+  const isModelReady = Boolean(activeNslModel && activeNslModel.classes.length >= 2);
 
   const [demoStep, setDemoStep] = useState<GuidedDemoStep>('ready');
   const [activePhraseIndex, setActivePhraseIndex] = useState<number>(0);
@@ -56,22 +84,57 @@ export function InterpretScreen() {
   const [showPhrasePicker, setShowPhrasePicker] = useState<boolean>(false);
   const [showSignGuide, setShowSignGuide] = useState<boolean>(false);
   const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
+  const [liveRecognition, setLiveRecognition] = useState<LiveRecognitionDisplay | null>(null);
+  const [liveHandsVisible, setLiveHandsVisible] = useState<boolean>(false);
+  const [isTranslatingLive, setIsTranslatingLive] = useState<boolean>(false);
 
   const isCameraActiveRef = useRef<boolean>(false);
+  const liveHandsVisibleRef = useRef<boolean>(false);
+  const translationSeqRef = useRef<number>(0);
+  const selectedLanguageRef = useRef<SupportedLanguage>(selectedLanguage);
+
   useEffect(() => {
     isCameraActiveRef.current = isCameraActive;
   }, [isCameraActive]);
 
-  const handleCameraToggle = useCallback((active: boolean) => {
-    setIsCameraActive(active);
+  useEffect(() => {
+    selectedLanguageRef.current = selectedLanguage;
+  }, [selectedLanguage]);
+
+  useEffect(() => {
+    signClassifier.setModel(activeNslModel);
+  }, [activeNslModel]);
+
+  useEffect(() => {
+    void signClassifier.ensureModelLoaded();
   }, []);
 
   const sequenceTimerRef = useRef<NodeJS.Timeout | null>(null);
   const captionTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-  const activePhrase: DemoPhrase = DEMO_PHRASES[activePhraseIndex] || DEMO_PHRASES[0];
-  const translatedCaption = activePhrase.translations[selectedLanguage];
-  const phoneticGuide = activePhrase.phoneticGuide?.[selectedLanguage];
+  const presetPhrase: DemoPhrase = DEMO_PHRASES[activePhraseIndex] || DEMO_PHRASES[0];
+  const matchedLivePreset = liveRecognition
+    ? DEMO_PHRASES.find((item) => item.id === liveRecognition.phraseId) ?? null
+    : null;
+
+  const activeConcept = liveRecognition
+    ? matchedLivePreset?.signConcept ?? liveRecognition.signConcept
+    : presetPhrase.signConcept;
+
+  const translatedCaption = liveRecognition
+    ? matchedLivePreset
+      ? matchedLivePreset.translations[selectedLanguage]
+      : liveRecognition.translatedText
+    : presetPhrase.translations[selectedLanguage];
+
+  const phoneticGuide = liveRecognition
+    ? matchedLivePreset?.phoneticGuide?.[selectedLanguage] ?? liveRecognition.phoneticGuide
+    : presetPhrase.phoneticGuide?.[selectedLanguage];
+
+  const activeDescription = liveRecognition
+    ? matchedLivePreset?.signDescription ?? liveRecognition.signDescription
+    : presetPhrase.signDescription;
+
   const currentLang = SUPPORTED_LANGUAGES[selectedLanguage];
   const words = translatedCaption.split(' ');
 
@@ -156,9 +219,13 @@ export function InterpretScreen() {
 
   const startGuidedDemo = useCallback(
     (phraseIndex: number = activePhraseIndex) => {
+      SpeechService.unlockAudio();
       SpeechService.stop();
+      ++translationSeqRef.current;
       if (sequenceTimerRef.current) clearTimeout(sequenceTimerRef.current);
       if (captionTimerRef.current) clearInterval(captionTimerRef.current);
+      setLiveRecognition(null);
+      setIsTranslatingLive(false);
 
       setActivePhraseIndex(phraseIndex);
       const targetPhrase = DEMO_PHRASES[phraseIndex];
@@ -192,6 +259,113 @@ export function InterpretScreen() {
     ]
   );
 
+  const handleLiveDetection = useCallback(
+    async (detection: SignClassificationResult) => {
+      if (!detection.labelId) return;
+
+      SpeechService.stop();
+      if (sequenceTimerRef.current) clearTimeout(sequenceTimerRef.current);
+      if (captionTimerRef.current) clearInterval(captionTimerRef.current);
+
+      const seq = ++translationSeqRef.current;
+      const targetLang = selectedLanguageRef.current;
+      const matchedIdx = DEMO_PHRASES.findIndex((item) => item.id === detection.labelId);
+
+      setShowPhrasePicker(false);
+      triggerHaptic('medium', preferences.hapticsEnabled);
+
+      if (matchedIdx >= 0) {
+        const phrase = DEMO_PHRASES[matchedIdx];
+        const targetText = phrase.translations[targetLang];
+        setActivePhraseIndex(matchedIdx);
+        setIsTranslatingLive(false);
+        setRevealedWordCount(targetText.split(' ').length);
+        setLiveRecognition({
+          phraseId: phrase.id,
+          signConcept: phrase.signConcept,
+          translatedText: targetText,
+          phoneticGuide: phrase.phoneticGuide?.[targetLang],
+          signDescription: phrase.signDescription,
+          language: targetLang,
+          confidence: detection.confidence,
+        });
+        playVoiceOutput(targetText, targetLang, phrase);
+        return;
+      }
+
+      const conceptName = detection.labelName ?? detection.labelId;
+      setIsTranslatingLive(true);
+
+      const res = await TranslationService.translate(conceptName, targetLang, 'en');
+      if (seq !== translationSeqRef.current || !isCameraActiveRef.current) {
+        return;
+      }
+
+      setIsTranslatingLive(false);
+      const finalText = res.translatedText.trim().length > 0 ? res.translatedText : conceptName;
+      const customMeta: DemoPhrase = {
+        id: detection.labelId,
+        signConcept: conceptName,
+        category: 'Trained NSL',
+        signDescription: 'Recognized live from your trained Nigerian Sign Language model.',
+        translations: {
+          en: conceptName,
+          ha: finalText,
+          yo: finalText,
+          ig: finalText,
+          pcm: finalText,
+        },
+      };
+
+      setRevealedWordCount(finalText.split(' ').length);
+      setLiveRecognition({
+        phraseId: customMeta.id,
+        signConcept: conceptName,
+        translatedText: finalText,
+        signDescription: customMeta.signDescription,
+        language: targetLang,
+        confidence: detection.confidence,
+      });
+      playVoiceOutput(finalText, targetLang, customMeta);
+    },
+    [playVoiceOutput, preferences.hapticsEnabled]
+  );
+
+  const handleCameraToggle = useCallback((active: boolean) => {
+    isCameraActiveRef.current = active;
+    setIsCameraActive(active);
+    signClassifier.reset();
+    ++translationSeqRef.current;
+    setIsTranslatingLive(false);
+
+    if (active) {
+      if (sequenceTimerRef.current) clearTimeout(sequenceTimerRef.current);
+      if (captionTimerRef.current) clearInterval(captionTimerRef.current);
+      setDemoStep('ready');
+      void signClassifier.ensureModelLoaded();
+    } else {
+      liveHandsVisibleRef.current = false;
+      setLiveHandsVisible(false);
+    }
+  }, []);
+
+  const handleTrackingFrame = useCallback(
+    (frame: TrackingFrame) => {
+      const hasHands = Boolean(frame.leftHandLandmarks || frame.rightHandLandmarks);
+      if (hasHands !== liveHandsVisibleRef.current) {
+        liveHandsVisibleRef.current = hasHands;
+        setLiveHandsVisible(hasHands);
+      }
+
+      if (!signClassifier.isReady()) return;
+      const tick = signClassifier.pushFrame(frame);
+      if (tick.detection) {
+        void handleLiveDetection(tick.detection);
+      }
+    },
+    [handleLiveDetection]
+  );
+
   // Auto-start demo when launched from Home / Onboarding
   useEffect(() => {
     if (!demoModeAutoStart) return;
@@ -210,13 +384,33 @@ export function InterpretScreen() {
   };
 
   const replayVoice = () => {
-    playVoiceOutput(translatedCaption, selectedLanguage, activePhrase);
+    SpeechService.unlockAudio();
+    const activeMeta: DemoPhrase = liveRecognition
+      ? matchedLivePreset ?? {
+          id: liveRecognition.phraseId,
+          signConcept: liveRecognition.signConcept,
+          category: 'Trained NSL',
+          signDescription: liveRecognition.signDescription ?? presetPhrase.signDescription,
+          translations: {
+            en: liveRecognition.signConcept,
+            ha: translatedCaption,
+            yo: translatedCaption,
+            ig: translatedCaption,
+            pcm: translatedCaption,
+          },
+        }
+      : presetPhrase;
+    playVoiceOutput(translatedCaption, selectedLanguage, activeMeta);
   };
 
   const resetGuidedExperience = () => {
     SpeechService.stop();
+    ++translationSeqRef.current;
+    signClassifier.reset();
     if (sequenceTimerRef.current) clearTimeout(sequenceTimerRef.current);
     if (captionTimerRef.current) clearInterval(captionTimerRef.current);
+    setLiveRecognition(null);
+    setIsTranslatingLive(false);
     setDemoStep('ready');
     setPlaybackState('ready');
     setRevealedWordCount(words.length);
@@ -274,8 +468,9 @@ export function InterpretScreen() {
       {/* 1. Live Camera Viewfinder */}
       <CameraViewport
         state={getCameraViewportState()}
-        isSimulatedDemo={demoStep !== 'ready'}
+        isSimulatedDemo={!isCameraActive && demoStep !== 'ready'}
         onCameraToggle={handleCameraToggle}
+        onTrackingFrame={handleTrackingFrame}
       />
 
       {/* 2. Live Translation Output Card */}
@@ -290,7 +485,7 @@ export function InterpretScreen() {
           >
             <Hand className="w-4 h-4 text-cyan-400 shrink-0" />
             <span className="text-xs font-bold text-white truncate">
-              {activePhrase.signConcept}
+              {activeConcept}
             </span>
             <ChevronDown
               className={clsx(
@@ -361,11 +556,28 @@ export function InterpretScreen() {
           <>
             {/* Translation Caption Box */}
             <div className="rounded-2xl bg-[#070b15] border border-white/[0.06] p-3.5 space-y-1.5">
-              <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider">
+              <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider gap-2">
                 <span className="text-slate-400">{currentLang.name}</span>
-                {stepStatusLabel && (
+                {isCameraActive && !isModelReady ? (
+                  <button
+                    onClick={() => navigateToTab('settings')}
+                    className="text-amber-300 hover:text-amber-200 transition-colors cursor-pointer"
+                  >
+                    Train NSL in Settings →
+                  </button>
+                ) : isTranslatingLive ? (
+                  <span className="text-cyan-400">Translating…</span>
+                ) : stepStatusLabel ? (
                   <span className="text-cyan-400">{stepStatusLabel}</span>
-                )}
+                ) : liveRecognition ? (
+                  <span className="text-emerald-400">
+                    Live • {Math.round(liveRecognition.confidence * 100)}%
+                  </span>
+                ) : isCameraActive && isModelReady ? (
+                  <span className={clsx(liveHandsVisible ? 'text-cyan-400' : 'text-slate-500')}>
+                    {liveHandsVisible ? 'Listening…' : 'Show hands'}
+                  </span>
+                ) : null}
               </div>
 
               <p className="text-lg font-bold text-white leading-snug tracking-tight">
@@ -392,12 +604,12 @@ export function InterpretScreen() {
                 </p>
               )}
 
-              {showSignGuide && (
+              {showSignGuide && activeDescription && (
                 <div className="pt-2 mt-2 border-t border-white/[0.06] text-[11px] text-slate-300 leading-relaxed">
                   <span className="text-cyan-400 font-semibold mr-1">
                     {t('interpret.movementLabel')}:
                   </span>
-                  <span>{activePhrase.signDescription}</span>
+                  <span>{activeDescription}</span>
                 </div>
               )}
             </div>

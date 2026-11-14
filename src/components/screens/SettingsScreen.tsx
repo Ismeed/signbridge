@@ -1,17 +1,21 @@
 'use client';
 
-import React from 'react';
+import React, { useState, useSyncExternalStore } from 'react';
 import clsx from 'clsx';
 import {
   Check,
   ShieldCheck,
   ChevronRight,
   RotateCcw,
+  Database,
 } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import { SUPPORTED_LANGUAGES } from '@/lib/translations';
 import { SupportedLanguage } from '@/lib/types';
 import { triggerHaptic } from '@/lib/speech';
+import { getNslSampleCountSnapshot, subscribeNslDataset } from '@/lib/nslDataset';
+import { getNslModelSnapshot, subscribeNslModel } from '@/lib/nslModel';
+import { NslRecorderModal } from '@/components/ui/NslRecorderModal';
 
 export function SettingsScreen() {
   const {
@@ -22,6 +26,18 @@ export function SettingsScreen() {
     goToOnboarding,
     t,
   } = useApp();
+
+  const [recorderOpen, setRecorderOpen] = useState<boolean>(false);
+  const nslSampleCount = useSyncExternalStore(
+    subscribeNslDataset,
+    getNslSampleCountSnapshot,
+    () => 0
+  );
+  const trainedNslModel = useSyncExternalStore(
+    subscribeNslModel,
+    getNslModelSnapshot,
+    () => null
+  );
 
   const handleToggleHaptics = () => {
     const next = !preferences.hapticsEnabled;
@@ -216,6 +232,26 @@ export function SettingsScreen() {
           </div>
 
           <button
+            id="btn-nsl-recorder"
+            onClick={() => setRecorderOpen(true)}
+            className="w-full px-4 py-3 flex items-center justify-between text-left hover:bg-white/[0.03] active:bg-white/[0.05] transition-colors cursor-pointer"
+          >
+            <span className="flex items-center gap-2.5 text-sm font-medium text-white">
+              <Database className="w-4 h-4 text-cyan-400" />
+              <span>NSL Training Dataset</span>
+            </span>
+            <span className="flex items-center gap-2 text-xs text-slate-400">
+              <span>{nslSampleCount} clips</span>
+              {trainedNslModel && (
+                <span className="px-1.5 py-0.5 rounded-md bg-emerald-500/15 text-emerald-300 text-[10px] font-semibold">
+                  Model Ready
+                </span>
+              )}
+              <ChevronRight className="w-4 h-4 text-slate-500" />
+            </span>
+          </button>
+
+          <button
             id="btn-revisit-welcome"
             onClick={goToOnboarding}
             className="w-full px-4 py-3 flex items-center justify-between text-left hover:bg-white/[0.03] active:bg-white/[0.05] transition-colors cursor-pointer"
@@ -232,6 +268,13 @@ export function SettingsScreen() {
       <p className="text-center text-[11px] text-slate-500 pt-1 pb-2">
         SignBridge AI • v1.0
       </p>
+
+      {recorderOpen && (
+        <NslRecorderModal
+          isOpen={recorderOpen}
+          onClose={() => setRecorderOpen(false)}
+        />
+      )}
     </div>
   );
 }

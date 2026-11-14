@@ -8,7 +8,7 @@ import {
   SupportedLanguage,
   UserPreferences,
 } from '@/lib/types';
-import { triggerHaptic } from '@/lib/speech';
+import { SpeechService, triggerHaptic } from '@/lib/speech';
 import { LOCALES } from '@/lib/locales';
 
 interface AppContextType {
@@ -172,6 +172,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   };
 
   const enterAppFromOnboarding = () => {
+    SpeechService.unlockAudio();
     markOnboarded();
     setActiveScreen('app');
     setActiveTab('home');
@@ -179,6 +180,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   };
 
   const startLiveSession = () => {
+    SpeechService.unlockAudio();
     markOnboarded();
     setActiveScreen('app');
     setActiveTab('interpret');
@@ -188,6 +190,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   };
 
   const startDemoSession = () => {
+    SpeechService.unlockAudio();
     markOnboarded();
     setActiveScreen('app');
     setActiveTab('interpret');

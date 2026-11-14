@@ -405,9 +405,25 @@ class NeuralVisionService {
     frame: TrackingFrame,
     width: number,
     height: number,
-    mirror: boolean = false
+    mirror: boolean = false,
+    sourceWidth?: number,
+    sourceHeight?: number
   ) {
     ctx.clearRect(0, 0, width, height);
+
+    // Match CSS object-fit: cover (centered) scaling so landmarks align on mobile aspect ratios
+    const hasValidSource =
+      typeof sourceWidth === 'number' &&
+      typeof sourceHeight === 'number' &&
+      sourceWidth > 0 &&
+      sourceHeight > 0;
+    const scale = hasValidSource
+      ? Math.max(width / sourceWidth, height / sourceHeight)
+      : 1;
+    const renderedWidth = hasValidSource ? sourceWidth * scale : width;
+    const renderedHeight = hasValidSource ? sourceHeight * scale : height;
+    const offsetX = (width - renderedWidth) / 2;
+    const offsetY = (height - renderedHeight) / 2;
 
     ctx.save();
 
@@ -418,8 +434,8 @@ class NeuralVisionService {
     }
 
     const toScreen = (p: NormalizedPoint) => ({
-      x: p.x * width,
-      y: p.y * height,
+      x: offsetX + p.x * renderedWidth,
+      y: offsetY + p.y * renderedHeight,
     });
 
     // 1. DRAW SIGNING SPACE BOUNDING CAGE (Chest & Shoulder Region)
@@ -468,10 +484,10 @@ class NeuralVisionService {
     // 3. DRAW HIGH-TECH BIOMETRIC FACE & HEAD RETICLE
     if (frame.faceBox) {
       const box = {
-        x: frame.faceBox.x * width,
-        y: frame.faceBox.y * height,
-        w: frame.faceBox.width * width,
-        h: frame.faceBox.height * height,
+        x: offsetX + frame.faceBox.x * renderedWidth,
+        y: offsetY + frame.faceBox.y * renderedHeight,
+        w: frame.faceBox.width * renderedWidth,
+        h: frame.faceBox.height * renderedHeight,
       };
 
       // Cybernetic Corner Brackets on Head
@@ -617,8 +633,10 @@ class NeuralVisionService {
     // Head telemetry tag
     if (frame.faceBox) {
       const box = {
-        x: mirror ? width - (frame.faceBox.x + frame.faceBox.width) * width : frame.faceBox.x * width,
-        y: frame.faceBox.y * height,
+        x: mirror
+          ? width - (offsetX + (frame.faceBox.x + frame.faceBox.width) * renderedWidth)
+          : offsetX + frame.faceBox.x * renderedWidth,
+        y: offsetY + frame.faceBox.y * renderedHeight,
       };
       ctx.fillText(`HEAD: ${frame.headTiltAngle}° TILT`, box.x, Math.max(16, box.y - 8));
     }

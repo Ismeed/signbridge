@@ -44,6 +44,7 @@ export function ActivityScreen() {
       return;
     }
 
+    SpeechService.unlockAudio();
     setSpeakingItemId(item.id);
     triggerHaptic('light', preferences.hapticsEnabled);
 

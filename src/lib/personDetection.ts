@@ -165,7 +165,6 @@ class PersonDetectorService {
       const vidW = video.videoWidth || 1;
       const vidH = video.videoHeight || 1;
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       for (const d of personDetections) {
         const bbox = d.boundingBox;
         if (!bbox) continue;

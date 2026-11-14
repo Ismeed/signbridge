@@ -12,18 +12,21 @@ import {
 } from 'lucide-react';
 import { InterpretationState } from '@/lib/types';
 import { neuralVision, TrackingFrame } from '@/lib/neuralVision';
+import { SpeechService } from '@/lib/speech';
 import { useApp } from '@/context/AppContext';
 
 interface CameraViewportProps {
   state: InterpretationState;
   onCameraToggle?: (active: boolean) => void;
   onPersonDetect?: (detected: boolean) => void;
+  onTrackingFrame?: (frame: TrackingFrame, facingMode: 'user' | 'environment') => void;
   isSimulatedDemo?: boolean;
 }
 
 export function CameraViewport({
   onCameraToggle,
   onPersonDetect,
+  onTrackingFrame,
   isSimulatedDemo = false,
 }: CameraViewportProps) {
   const { t } = useApp();
@@ -35,10 +38,12 @@ export function CameraViewport({
 
   const onCameraToggleRef = useRef(onCameraToggle);
   const onPersonDetectRef = useRef(onPersonDetect);
+  const onTrackingFrameRef = useRef(onTrackingFrame);
   useEffect(() => {
     onCameraToggleRef.current = onCameraToggle;
     onPersonDetectRef.current = onPersonDetect;
-  }, [onCameraToggle, onPersonDetect]);
+    onTrackingFrameRef.current = onTrackingFrame;
+  }, [onCameraToggle, onPersonDetect, onTrackingFrame]);
 
   const [cameraActive, setCameraActive] = useState<boolean>(false);
   const cameraActiveRef = useRef<boolean>(false);
@@ -201,6 +206,7 @@ export function CameraViewport({
     if (cameraActive) {
       stopCamera();
     } else {
+      SpeechService.unlockAudio();
       startCamera(facingMode);
     }
   };
@@ -238,6 +244,10 @@ export function CameraViewport({
           ) {
             frame = neuralVision.processVideoFrame(video, time);
 
+            if (onTrackingFrameRef.current) {
+              onTrackingFrameRef.current(frame, facingModeRef.current);
+            }
+
             if (frame.isPersonTracked !== lastPersonTrackedRef.current) {
               lastPersonTrackedRef.current = frame.isPersonTracked;
               if (onPersonDetectRef.current) {
@@ -257,7 +267,15 @@ export function CameraViewport({
 
             if (showNeuralOverlaysRef.current) {
               const isFrontCamera = facingModeRef.current === 'user';
-              neuralVision.renderHUD(ctx, frame, width, height, isFrontCamera);
+              neuralVision.renderHUD(
+                ctx,
+                frame,
+                width,
+                height,
+                isFrontCamera,
+                video.videoWidth,
+                video.videoHeight
+              );
             } else {
               ctx.clearRect(0, 0, width, height);
             }

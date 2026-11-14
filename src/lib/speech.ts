@@ -27,13 +27,85 @@ export interface SpeechCallbacks {
   onError?: (errorMessage: string) => void;
 }
 
+const MAX_AUDIO_CACHE_ENTRIES = 25;
+
+interface WindowWithWebkitAudio extends Window {
+  webkitAudioContext?: typeof AudioContext;
+}
+
+function writeAscii(view: DataView, offset: number, text: string) {
+  for (let i = 0; i < text.length; i++) {
+    view.setUint8(offset + i, text.charCodeAt(i));
+  }
+}
+
+function createSilentWavBlobUrl(): string {
+  const buffer = new ArrayBuffer(46);
+  const view = new DataView(buffer);
+  writeAscii(view, 0, 'RIFF');
+  view.setUint32(4, 38, true);
+  writeAscii(view, 8, 'WAVE');
+  writeAscii(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, 8000, true);
+  view.setUint32(28, 16000, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeAscii(view, 36, 'data');
+  view.setUint32(40, 2, true);
+  view.setInt16(44, 0, true);
+  return URL.createObjectURL(new Blob([buffer], { type: 'audio/wav' }));
+}
+
 export class SpeechService {
   private static synth: SpeechSynthesis | null = null;
   private static voices: SpeechSynthesisVoice[] = [];
   private static isInitialized = false;
   private static activeUtterance: SpeechSynthesisUtterance | null = null;
-  private static activeAudio: HTMLAudioElement | null = null;
+  private static sharedAudio: HTMLAudioElement | null = null;
+  private static audioContext: AudioContext | null = null;
+  private static silentWavUrl: string | null = null;
+  private static isAudioUnlocked = false;
+  private static isSpeakingAudio = false;
+  private static playbackSeq = 0;
   private static audioCache = new Map<string, string>();
+
+  private static getOrCreateAudioElement(): HTMLAudioElement {
+    if (!SpeechService.sharedAudio) {
+      const audio = new Audio();
+      audio.setAttribute('playsinline', 'true');
+      audio.preload = 'auto';
+      SpeechService.sharedAudio = audio;
+    }
+    return SpeechService.sharedAudio;
+  }
+
+  private static clearAudioHandlers(audio: HTMLAudioElement) {
+    audio.onplay = null;
+    audio.onended = null;
+    audio.onerror = null;
+  }
+
+  private static cacheAudioUrl(cacheKey: string, objectUrl: string) {
+    const existing = SpeechService.audioCache.get(cacheKey);
+    if (existing && existing !== objectUrl) {
+      URL.revokeObjectURL(existing);
+    }
+    SpeechService.audioCache.delete(cacheKey);
+    SpeechService.audioCache.set(cacheKey, objectUrl);
+
+    while (SpeechService.audioCache.size > MAX_AUDIO_CACHE_ENTRIES) {
+      const oldestKey = SpeechService.audioCache.keys().next().value;
+      if (!oldestKey) break;
+      const oldestUrl = SpeechService.audioCache.get(oldestKey);
+      SpeechService.audioCache.delete(oldestKey);
+      if (oldestUrl) {
+        URL.revokeObjectURL(oldestUrl);
+      }
+    }
+  }
 
   public static init() {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
@@ -48,6 +120,57 @@ export class SpeechService {
         window.speechSynthesis.onvoiceschanged = loadVoices;
       }
       SpeechService.isInitialized = true;
+    }
+  }
+
+  /**
+   * Synchronously unlock a persistent audio element and Web Audio context inside
+   * a user tap gesture so mobile iOS/Android browsers allow async TTS playback.
+   */
+  public static unlockAudio() {
+    if (typeof window === 'undefined') return;
+
+    SpeechService.init();
+
+    try {
+      const AudioCtx =
+        window.AudioContext || (window as WindowWithWebkitAudio).webkitAudioContext;
+      if (AudioCtx) {
+        if (!SpeechService.audioContext) {
+          SpeechService.audioContext = new AudioCtx();
+        }
+        if (SpeechService.audioContext.state === 'suspended') {
+          SpeechService.audioContext.resume().catch(() => {});
+        }
+      }
+    } catch {
+      // Ignore AudioContext restriction errors
+    }
+
+    if (SpeechService.isAudioUnlocked || SpeechService.isSpeakingAudio) {
+      return;
+    }
+
+    try {
+      const audio = SpeechService.getOrCreateAudioElement();
+      if (!SpeechService.silentWavUrl) {
+        SpeechService.silentWavUrl = createSilentWavBlobUrl();
+      }
+      audio.src = SpeechService.silentWavUrl;
+      audio.muted = false;
+      audio.volume = 1;
+      const playPromise = audio.play();
+      if (playPromise !== undefined) {
+        playPromise
+          .then(() => {
+            SpeechService.isAudioUnlocked = true;
+          })
+          .catch(() => {
+            // Will unlock on the next explicit user interaction
+          });
+      }
+    } catch {
+      // Safe fallback if browser restricts pre-unlock
     }
   }
 
@@ -96,19 +219,46 @@ export class SpeechService {
   ): Promise<boolean> {
     // 1. Immediately stop any active speech or audio
     SpeechService.stop();
+    const attemptId = ++SpeechService.playbackSeq;
+    let hasStarted = false;
+    let hasFinished = false;
+
+    const notifyStart = () => {
+      if (attemptId !== SpeechService.playbackSeq || hasStarted || hasFinished) return;
+      hasStarted = true;
+      callbacks?.onStart?.();
+    };
+
+    const notifyEnd = () => {
+      if (attemptId !== SpeechService.playbackSeq || hasFinished) return;
+      hasFinished = true;
+      callbacks?.onEnd?.();
+    };
+
+    const notifyError = (message: string) => {
+      if (attemptId !== SpeechService.playbackSeq || hasFinished) return;
+      hasFinished = true;
+      if (callbacks?.onError) {
+        callbacks.onError(message);
+      } else {
+        callbacks?.onEnd?.();
+      }
+    };
 
     const cacheKey = `${lang}:${text.trim()}`;
 
     // Helper: Browser speech fallback
     const fallbackToBrowser = () => {
+      if (attemptId !== SpeechService.playbackSeq) return false;
+
       if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
-        if (callbacks?.onEnd) callbacks.onEnd();
+        notifyError('Speech output is unavailable in this browser.');
         return false;
       }
       if (!SpeechService.synth) SpeechService.init();
       const synth = SpeechService.synth;
       if (!synth) {
-        if (callbacks?.onEnd) callbacks.onEnd();
+        notifyError('Speech synthesis engine is unavailable.');
         return false;
       }
 
@@ -120,56 +270,77 @@ export class SpeechService {
         utterance.pitch = 1.0;
 
         utterance.onstart = () => {
-          if (callbacks?.onStart) callbacks.onStart();
+          notifyStart();
         };
         utterance.onend = () => {
-          SpeechService.activeUtterance = null;
-          if (callbacks?.onEnd) callbacks.onEnd();
+          if (SpeechService.activeUtterance === utterance) {
+            SpeechService.activeUtterance = null;
+          }
+          notifyEnd();
         };
-        utterance.onerror = () => {
-          SpeechService.activeUtterance = null;
-          if (callbacks?.onEnd) callbacks.onEnd();
+        utterance.onerror = (event) => {
+          if (SpeechService.activeUtterance === utterance) {
+            SpeechService.activeUtterance = null;
+          }
+          notifyError(`Browser speech failed: ${event.error || 'unknown error'}`);
         };
 
         SpeechService.activeUtterance = utterance;
         synth.speak(utterance);
         return true;
       } catch {
-        if (callbacks?.onEnd) callbacks.onEnd();
+        notifyError('Browser speech failed to start.');
         return false;
       }
     };
 
-    // Helper: Play from audio URL
+    // Helper: Play from audio URL using persistent unlocked audio element
     const playAudioUrl = (audioUrl: string) => {
+      if (attemptId !== SpeechService.playbackSeq || typeof window === 'undefined') {
+        return false;
+      }
+
       try {
-        const audio = new Audio(audioUrl);
-        SpeechService.activeAudio = audio;
+        const audio = SpeechService.getOrCreateAudioElement();
+        SpeechService.clearAudioHandlers(audio);
+        SpeechService.isSpeakingAudio = true;
 
         audio.onplay = () => {
-          if (callbacks?.onStart) callbacks.onStart();
+          SpeechService.isAudioUnlocked = true;
+          notifyStart();
         };
 
         audio.onended = () => {
-          SpeechService.activeAudio = null;
-          if (callbacks?.onEnd) callbacks.onEnd();
+          SpeechService.clearAudioHandlers(audio);
+          SpeechService.isSpeakingAudio = false;
+          notifyEnd();
         };
 
         audio.onerror = () => {
+          SpeechService.clearAudioHandlers(audio);
+          SpeechService.isSpeakingAudio = false;
+          if (attemptId !== SpeechService.playbackSeq) return;
           console.warn('Audio playback error, falling back to browser speech');
-          SpeechService.activeAudio = null;
           fallbackToBrowser();
         };
+
+        audio.src = audioUrl;
+        audio.muted = false;
+        audio.volume = 1;
 
         const playPromise = audio.play();
         if (playPromise !== undefined) {
           playPromise.catch((err) => {
+            SpeechService.clearAudioHandlers(audio);
+            SpeechService.isSpeakingAudio = false;
+            if (attemptId !== SpeechService.playbackSeq) return;
             console.warn('Audio play was prevented or failed:', err);
             fallbackToBrowser();
           });
         }
         return true;
       } catch (err) {
+        SpeechService.isSpeakingAudio = false;
         console.warn('Failed to initialize Audio, falling back:', err);
         return fallbackToBrowser();
       }
@@ -178,18 +349,22 @@ export class SpeechService {
     // 2. Check if already cached in memory
     if (SpeechService.audioCache.has(cacheKey)) {
       const cachedUrl = SpeechService.audioCache.get(cacheKey)!;
+      SpeechService.audioCache.delete(cacheKey);
+      SpeechService.audioCache.set(cacheKey, cachedUrl);
       return playAudioUrl(cachedUrl);
     }
 
     // 3. Request Gemini Neural TTS audio from our backend route
     try {
-      if (callbacks?.onStart) callbacks.onStart();
-
       const response = await fetch('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text, lang }),
       });
+
+      if (attemptId !== SpeechService.playbackSeq) {
+        return false;
+      }
 
       if (!response.ok) {
         console.warn('Server TTS returned non-200, falling back to browser synthesis.');
@@ -197,11 +372,18 @@ export class SpeechService {
       }
 
       const blob = await response.blob();
+      if (attemptId !== SpeechService.playbackSeq) {
+        return false;
+      }
+
       const objectUrl = URL.createObjectURL(blob);
-      SpeechService.audioCache.set(cacheKey, objectUrl);
+      SpeechService.cacheAudioUrl(cacheKey, objectUrl);
 
       return playAudioUrl(objectUrl);
     } catch (error) {
+      if (attemptId !== SpeechService.playbackSeq) {
+        return false;
+      }
       console.warn('TTS fetch failed, falling back to browser speech:', error);
       return fallbackToBrowser();
     }
@@ -211,14 +393,18 @@ export class SpeechService {
    * Immediately cancel any running speech or audio playback
    */
   public static stop() {
-    if (SpeechService.activeAudio) {
+    SpeechService.playbackSeq++;
+
+    if (SpeechService.sharedAudio && SpeechService.isSpeakingAudio) {
+      const audio = SpeechService.sharedAudio;
+      SpeechService.clearAudioHandlers(audio);
       try {
-        SpeechService.activeAudio.pause();
-        SpeechService.activeAudio.currentTime = 0;
+        audio.pause();
+        audio.currentTime = 0;
       } catch {
         // Safe tear down
       }
-      SpeechService.activeAudio = null;
+      SpeechService.isSpeakingAudio = false;
     }
 
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
