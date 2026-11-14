@@ -20,6 +20,7 @@ interface CameraViewportProps {
   onCameraToggle?: (active: boolean) => void;
   onPersonDetect?: (detected: boolean) => void;
   onTrackingFrame?: (frame: TrackingFrame, facingMode: 'user' | 'environment') => void;
+  onTrackerReadyChange?: (ready: boolean) => void;
   isSimulatedDemo?: boolean;
   forceEnglish?: boolean;
 }
@@ -29,6 +30,7 @@ const ENGLISH_STUDIO_LABELS: Record<string, string> = {
   'interpret.scanning': 'Scanning',
   'interpret.demo': 'Demo',
   'interpret.standby': 'Standby',
+  'interpret.trackerLoading': 'Loading AI...',
   'interpret.cameraOffPrompt': 'Tap Start Camera to record NSL clips.',
   'interpret.cameraStart': 'Start Camera',
   'interpret.cameraStop': 'Stop Camera',
@@ -38,6 +40,7 @@ export function CameraViewport({
   onCameraToggle,
   onPersonDetect,
   onTrackingFrame,
+  onTrackerReadyChange,
   isSimulatedDemo = false,
   forceEnglish = false,
 }: CameraViewportProps) {
@@ -53,11 +56,13 @@ export function CameraViewport({
   const onCameraToggleRef = useRef(onCameraToggle);
   const onPersonDetectRef = useRef(onPersonDetect);
   const onTrackingFrameRef = useRef(onTrackingFrame);
+  const onTrackerReadyChangeRef = useRef(onTrackerReadyChange);
   useEffect(() => {
     onCameraToggleRef.current = onCameraToggle;
     onPersonDetectRef.current = onPersonDetect;
     onTrackingFrameRef.current = onTrackingFrame;
-  }, [onCameraToggle, onPersonDetect, onTrackingFrame]);
+    onTrackerReadyChangeRef.current = onTrackerReadyChange;
+  }, [onCameraToggle, onPersonDetect, onTrackingFrame, onTrackerReadyChange]);
 
   const [cameraActive, setCameraActive] = useState<boolean>(false);
   const cameraActiveRef = useRef<boolean>(false);
@@ -72,6 +77,8 @@ export function CameraViewport({
   }, [facingMode]);
 
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [trackerReady, setTrackerReady] = useState<boolean>(() => neuralVision.isReady());
+  const trackerReadyRef = useRef<boolean>(trackerReady);
   const [showNeuralOverlays, setShowNeuralOverlays] = useState<boolean>(true);
   const showNeuralOverlaysRef = useRef<boolean>(true);
   useEffect(() => {
@@ -123,9 +130,21 @@ export function CameraViewport({
 
   // Pre-initialize neural vision engine
   useEffect(() => {
-    neuralVision.init().catch((err) => {
-      console.warn('Neural vision engine init notice:', err);
-    });
+    let active = true;
+    neuralVision
+      .init()
+      .then((ready) => {
+        if (!active) return;
+        trackerReadyRef.current = ready;
+        setTrackerReady(ready);
+        onTrackerReadyChangeRef.current?.(ready);
+      })
+      .catch((err) => {
+        console.warn('Neural vision engine init notice:', err);
+      });
+    return () => {
+      active = false;
+    };
   }, []);
 
   const stopCamera = useCallback(() => {
@@ -178,8 +197,8 @@ export function CameraViewport({
         audio: false,
         video: {
           facingMode: { ideal: targetFacing },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
+          width: { ideal: 640 },
+          height: { ideal: 480 },
         },
       };
 
@@ -258,7 +277,17 @@ export function CameraViewport({
           ) {
             frame = neuralVision.processVideoFrame(video, time);
 
-            if (onTrackingFrameRef.current) {
+            if (frame.trackerReady && !trackerReadyRef.current) {
+              trackerReadyRef.current = true;
+              setTrackerReady(true);
+              onTrackerReadyChangeRef.current?.(true);
+            }
+
+            if (
+              frame.trackerReady !== false &&
+              frame.isNewVideoFrame !== false &&
+              onTrackingFrameRef.current
+            ) {
               onTrackingFrameRef.current(frame, facingModeRef.current);
             }
 
@@ -329,7 +358,9 @@ export function CameraViewport({
     : 'bg-slate-500';
 
   const statusLabel = cameraActive
-    ? telemetry.isPersonTracked
+    ? !trackerReady
+      ? ENGLISH_STUDIO_LABELS['interpret.trackerLoading']
+      : telemetry.isPersonTracked
       ? telemetry.handsCount > 0
         ? `${label('interpret.locked')} • ${telemetry.handsCount}H`
         : label('interpret.locked')

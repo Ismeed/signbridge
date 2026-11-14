@@ -25,6 +25,8 @@ export interface TrackingFrame {
   isSigningActive: boolean;
   confidence: number;
   fps: number;
+  trackerReady?: boolean;
+  isNewVideoFrame?: boolean;
 }
 
 // MediaPipe connections for standard 21-point hand skeleton
@@ -79,12 +81,13 @@ class NeuralVisionService {
   private poseLandmarker: any = null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private handLandmarker: any = null;
-  private isInitializing = false;
+  private initPromise: Promise<boolean> | null = null;
   private isLoaded = false;
-  private lastFrameTime = 0;
   private frameCount = 0;
   private currentFps = 60;
   private fpsTimer = 0;
+  private lastVideoTime = -1;
+  private lastProcessedFrame: TrackingFrame | null = null;
 
   // Kinetic trail histories for motion visualization
   private leftHandTrail: NormalizedPoint[] = [];
@@ -92,84 +95,85 @@ class NeuralVisionService {
 
   public async init(): Promise<boolean> {
     if (this.isLoaded) return true;
-    if (this.isInitializing) return false;
+    if (this.initPromise) return this.initPromise;
     if (typeof window === 'undefined') return false;
 
-    this.isInitializing = true;
-
-    try {
-      const { FilesetResolver, PoseLandmarker, HandLandmarker } = await import(
-        '@mediapipe/tasks-vision'
-      );
-
-      // Try local WASM first, fallback to CDN
-      let vision;
+    this.initPromise = (async () => {
       try {
-        vision = await FilesetResolver.forVisionTasks('/mediapipe/wasm');
-      } catch {
-        vision = await FilesetResolver.forVisionTasks(
-          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.1.0/wasm'
+        const { FilesetResolver, PoseLandmarker, HandLandmarker } = await import(
+          '@mediapipe/tasks-vision'
         );
-      }
 
-      // Initialize Pose Landmarker (tracks Head, Face, Torso, Arms)
-      try {
-        this.poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
-          baseOptions: {
-            modelAssetPath: '/mediapipe/models/pose_landmarker_lite.task',
-            delegate: 'GPU',
-          },
-          runningMode: 'VIDEO',
-          numPoses: 1,
-          minPoseDetectionConfidence: 0.45,
-          minPosePresenceConfidence: 0.45,
-          minTrackingConfidence: 0.45,
-        });
-      } catch (err) {
-        console.warn('Local Pose model failed, falling back to remote CDN:', err);
-        this.poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
-          baseOptions: {
-            modelAssetPath:
-              'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
-          },
-          runningMode: 'VIDEO',
-          numPoses: 1,
-        });
-      }
+        let vision;
+        try {
+          vision = await FilesetResolver.forVisionTasks('/mediapipe/wasm');
+        } catch {
+          vision = await FilesetResolver.forVisionTasks(
+            'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.1.0/wasm'
+          );
+        }
 
-      // Initialize Hand Landmarker (tracks 21 high-precision joints per hand)
-      try {
-        this.handLandmarker = await HandLandmarker.createFromOptions(vision, {
-          baseOptions: {
-            modelAssetPath: '/mediapipe/models/hand_landmarker.task',
-            delegate: 'GPU',
-          },
-          runningMode: 'VIDEO',
-          numHands: 2,
-          minHandDetectionConfidence: 0.45,
-          minHandPresenceConfidence: 0.45,
-          minTrackingConfidence: 0.45,
-        });
-      } catch (err) {
-        console.warn('Local Hand model failed, falling back to remote CDN:', err);
-        this.handLandmarker = await HandLandmarker.createFromOptions(vision, {
-          baseOptions: {
-            modelAssetPath:
-              'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
-          },
-          runningMode: 'VIDEO',
-          numHands: 2,
-        });
-      }
+        const createWithDelegateFallback = async <T>(
+          createFn: (opts: Record<string, unknown>) => Promise<T>,
+          localPath: string,
+          cdnPath: string,
+          extraOptions: Record<string, unknown>
+        ): Promise<T> => {
+          for (const delegate of ['GPU', 'CPU'] as const) {
+            try {
+              return await createFn({
+                baseOptions: { modelAssetPath: localPath, delegate },
+                runningMode: 'VIDEO',
+                ...extraOptions,
+              });
+            } catch {
+              // Retry CPU delegate locally before falling back to CDN
+            }
+          }
+          return createFn({
+            baseOptions: { modelAssetPath: cdnPath },
+            runningMode: 'VIDEO',
+            ...extraOptions,
+          });
+        };
 
-      this.isLoaded = true;
-      this.isInitializing = false;
-      return true;
-    } catch (error) {
-      console.error('Neural Vision initialization error:', error);
-      this.isInitializing = false;
-      return false;
-    }
+        this.poseLandmarker = await createWithDelegateFallback(
+          (opts) => PoseLandmarker.createFromOptions(vision, opts),
+          '/mediapipe/models/pose_landmarker_lite.task',
+          'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
+          {
+            numPoses: 1,
+            minPoseDetectionConfidence: 0.45,
+            minPosePresenceConfidence: 0.45,
+            minTrackingConfidence: 0.45,
+          }
+        );
+
+        this.handLandmarker = await createWithDelegateFallback(
+          (opts) => HandLandmarker.createFromOptions(vision, opts),
+          '/mediapipe/models/hand_landmarker.task',
+          'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+          {
+            numHands: 2,
+            minHandDetectionConfidence: 0.45,
+            minHandPresenceConfidence: 0.45,
+            minTrackingConfidence: 0.45,
+          }
+        );
+
+        this.isLoaded = true;
+        return true;
+      } catch (error) {
+        console.error('Neural Vision initialization error:', error);
+        return false;
+      } finally {
+        if (!this.isLoaded) {
+          this.initPromise = null;
+        }
+      }
+    })();
+
+    return this.initPromise;
   }
 
   public isReady(): boolean {
@@ -193,6 +197,7 @@ class NeuralVisionService {
       this.fpsTimer = timestamp;
     }
 
+    const ready = this.isReady();
     const frameResult: TrackingFrame = {
       timestamp,
       faceBox: null,
@@ -205,20 +210,39 @@ class NeuralVisionService {
       isSigningActive: false,
       confidence: 0,
       fps: this.currentFps || 60,
+      trackerReady: ready,
+      isNewVideoFrame: false,
     };
 
     if (
-      !this.isReady() ||
+      !ready ||
       video.readyState < 2 ||
       video.videoWidth === 0 ||
       video.videoHeight === 0
     ) {
+      this.lastProcessedFrame = null;
       return frameResult;
+    }
+
+    // Reuse cached tracking landmarks between hardware camera ticks to halve WebGL/WASM load.
+    if (
+      video.currentTime > 0 &&
+      video.currentTime === this.lastVideoTime &&
+      this.lastProcessedFrame
+    ) {
+      return {
+        ...this.lastProcessedFrame,
+        timestamp,
+        fps: this.currentFps || 60,
+        trackerReady: true,
+        isNewVideoFrame: false,
+      };
     }
 
     // MediaPipe requires strictly monotonically increasing timestamps
     const safeTimestamp = Math.max(timestamp, this.lastInferenceTimestamp + 1);
     this.lastInferenceTimestamp = safeTimestamp;
+    frameResult.isNewVideoFrame = true;
 
     try {
       // 1. Process Pose (Face + Upper Body)
@@ -301,6 +325,9 @@ class NeuralVisionService {
     } catch {
       // Gracefully handle occasional frame skip
     }
+
+    this.lastVideoTime = video.currentTime;
+    this.lastProcessedFrame = frameResult;
 
     return frameResult;
   }

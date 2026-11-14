@@ -192,8 +192,8 @@ export function extractNslFrameFeatures(
   if (prevFrame) {
     prevAnchor = computeAnchor(prevFrame);
     const dtSec = (frame.timestamp - prevFrame.timestamp) / 1000;
-    if (dtSec >= 0.005 && dtSec <= 0.35) {
-      stepScale = Math.min(Math.max((1 / 30) / dtSec, 0.25), 4);
+    if (dtSec >= 0.005 && dtSec <= 0.6) {
+      stepScale = Math.min(Math.max((1 / 30) / dtSec, 0.1), 4);
     } else {
       stepScale = 0;
     }

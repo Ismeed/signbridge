@@ -85,7 +85,9 @@ interface CloudSummaryState {
 }
 
 const COUNTDOWN_SECONDS = 2;
-const RECORD_DURATION_MS = 2000;
+const DEFAULT_CAPTURE_DURATION_MS = 3000;
+const CAPTURE_DURATION_OPTIONS = [2000, 3000, 4000] as const;
+const MAX_FRAME_EXTENSION_MS = 2500;
 const MAX_CLOUD_BATCH = 25;
 const NSL_SYNCED_IDS_KEY = 'signbridge_nsl_synced_ids_v1';
 
@@ -127,7 +129,10 @@ export function NslCollectStudio({ standalone = false }: NslCollectStudioProps) 
   const [selectedLabelId, setSelectedLabelId] = useState<string>('greeting');
   const [showAddLabel, setShowAddLabel] = useState<boolean>(false);
   const [cameraActive, setCameraActive] = useState<boolean>(false);
+  const [trackerReady, setTrackerReady] = useState<boolean>(false);
+  const [captureDurationMs, setCaptureDurationMs] = useState<number>(DEFAULT_CAPTURE_DURATION_MS);
   const [capturePhase, setCapturePhase] = useState<CapturePhase>('idle');
+  const [captureExtending, setCaptureExtending] = useState<boolean>(false);
   const [countdownLeft, setCountdownLeft] = useState<number>(COUNTDOWN_SECONDS);
   const [capturedFramesCount, setCapturedFramesCount] = useState<number>(0);
   const [handsVisibleLive, setHandsVisibleLive] = useState<boolean>(false);
@@ -144,6 +149,7 @@ export function NslCollectStudio({ standalone = false }: NslCollectStudioProps) 
   const rawVectorsRef = useRef<number[][]>([]);
   const prevFrameRef = useRef<TrackingFrame | null>(null);
   const recordStartPerfRef = useRef<number>(0);
+  const captureDurationMsRef = useRef<number>(captureDurationMs);
   const facingModeRef = useRef<'user' | 'environment'>('user');
   const signerInputRef = useRef<string>(signerInput);
   const selectedLabelRef = useRef<{ id: string; name: string }>({
@@ -154,6 +160,7 @@ export function NslCollectStudio({ standalone = false }: NslCollectStudioProps) 
   const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const finishTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const progressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const extendTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const selectedLabel = useMemo(
     () => labels.find((item) => item.id === selectedLabelId) ?? labels[0],
@@ -169,6 +176,10 @@ export function NslCollectStudio({ standalone = false }: NslCollectStudioProps) 
   useEffect(() => {
     signerInputRef.current = signerInput;
   }, [signerInput]);
+
+  useEffect(() => {
+    captureDurationMsRef.current = captureDurationMs;
+  }, [captureDurationMs]);
 
   useEffect(() => {
     let cancelled = false;
@@ -215,6 +226,10 @@ export function NslCollectStudio({ standalone = false }: NslCollectStudioProps) 
       clearInterval(progressTimerRef.current);
       progressTimerRef.current = null;
     }
+    if (extendTimerRef.current) {
+      clearInterval(extendTimerRef.current);
+      extendTimerRef.current = null;
+    }
   }, []);
 
   const resetCaptureState = useCallback(() => {
@@ -223,6 +238,7 @@ export function NslCollectStudio({ standalone = false }: NslCollectStudioProps) 
     rawFeaturesRef.current = [];
     rawVectorsRef.current = [];
     prevFrameRef.current = null;
+    setCaptureExtending(false);
     setCapturePhase('idle');
     setCapturedFramesCount(0);
   }, [clearActiveTimers]);
@@ -242,6 +258,7 @@ export function NslCollectStudio({ standalone = false }: NslCollectStudioProps) 
     }
 
     isRecordingRef.current = false;
+    setCaptureExtending(false);
     setCapturePhase('idle');
 
     const capturedFeatures = rawFeaturesRef.current;
@@ -256,11 +273,12 @@ export function NslCollectStudio({ standalone = false }: NslCollectStudioProps) 
     const quality = evaluateSequenceQuality(capturedFeatures, durationMs);
     if (!quality.isUsable) {
       const handPct = Math.round(quality.handCoverageRatio * 100);
+      const secLabel = (durationMs / 1000).toFixed(1);
       setStatusBanner({
         tone: 'error',
         message:
           quality.rawFrameCount < NSL_MIN_RAW_FRAMES
-            ? `Only ${quality.rawFrameCount} frames captured (need ${NSL_MIN_RAW_FRAMES}+). Keep camera active and retry.`
+            ? `Only ${quality.rawFrameCount} tracked frames captured in ${secLabel}s (${quality.fpsEstimate} FPS, need ${NSL_MIN_RAW_FRAMES}+). Use bright lighting, wait for landmarks, or choose 4s clip length.`
             : `Low hand visibility (${handPct}% across ${quality.rawFrameCount} frames). Keep signing hands in frame.`,
       });
       return;
@@ -294,11 +312,13 @@ export function NslCollectStudio({ standalone = false }: NslCollectStudioProps) 
   }, [clearActiveTimers, preferences.hapticsEnabled]);
 
   const beginRecordingWindow = useCallback(() => {
+    const targetDurationMs = captureDurationMsRef.current;
     rawFeaturesRef.current = [];
     rawVectorsRef.current = [];
     prevFrameRef.current = null;
     recordStartPerfRef.current = performance.now();
     isRecordingRef.current = true;
+    setCaptureExtending(false);
     setCapturePhase('recording');
     setCapturedFramesCount(0);
     triggerHaptic('medium', preferences.hapticsEnabled);
@@ -308,8 +328,22 @@ export function NslCollectStudio({ standalone = false }: NslCollectStudioProps) 
     }, 100);
 
     finishTimerRef.current = setTimeout(() => {
-      finishRecording();
-    }, RECORD_DURATION_MS);
+      if (rawFeaturesRef.current.length >= NSL_MIN_RAW_FRAMES) {
+        finishRecording();
+        return;
+      }
+      setCaptureExtending(true);
+      const maxDeadline = recordStartPerfRef.current + targetDurationMs + MAX_FRAME_EXTENSION_MS;
+      extendTimerRef.current = setInterval(() => {
+        setCapturedFramesCount(rawVectorsRef.current.length);
+        if (
+          rawFeaturesRef.current.length >= NSL_MIN_RAW_FRAMES ||
+          performance.now() >= maxDeadline
+        ) {
+          finishRecording();
+        }
+      }, 100);
+    }, targetDurationMs);
   }, [finishRecording, preferences.hapticsEnabled]);
 
   const handleStartCapture = () => {
@@ -323,6 +357,14 @@ export function NslCollectStudio({ standalone = false }: NslCollectStudioProps) 
     if (capturePhase !== 'idle') {
       resetCaptureState();
       setStatusBanner({ tone: 'info', message: 'Capture cancelled.' });
+      return;
+    }
+    if (!trackerReady) {
+      setStatusBanner({
+        tone: 'info',
+        message:
+          'AI hand & body tracker is still warming up (first load takes a few seconds). Wait for "Scanning" or green hand joints, then tap Record.',
+      });
       return;
     }
 
@@ -938,6 +980,7 @@ export function NslCollectStudio({ standalone = false }: NslCollectStudioProps) 
             state={capturePhase === 'recording' ? 'tracking' : cameraActive ? 'ready' : 'idle'}
             forceEnglish
             onCameraToggle={handleCameraToggle}
+            onTrackerReadyChange={setTrackerReady}
             onTrackingFrame={handleTrackingFrame}
           />
 
@@ -954,7 +997,11 @@ export function NslCollectStudio({ standalone = false }: NslCollectStudioProps) 
             <div className="absolute top-12 inset-x-3 z-30 flex items-center justify-between pointer-events-none">
               <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-rose-600/90 text-white text-xs font-bold shadow-lg">
                 <span className="w-2 h-2 rounded-full bg-white animate-pulse" />
-                <span>REC • {capturedFramesCount}f</span>
+                <span>
+                  {captureExtending
+                    ? `HOLD • ${capturedFramesCount}/${NSL_MIN_RAW_FRAMES}f`
+                    : `REC • ${capturedFramesCount}f`}
+                </span>
               </div>
               <span
                 className={clsx(
@@ -970,48 +1017,83 @@ export function NslCollectStudio({ standalone = false }: NslCollectStudioProps) 
           )}
         </div>
 
-        {/* Capture Action Bar */}
-        <div className="flex items-center gap-2">
-          <button
-            id="btn-record-nsl-clip"
-            onClick={handleStartCapture}
-            className={clsx(
-              'flex-1 py-3 px-4 rounded-2xl font-bold text-sm flex items-center justify-center gap-2 transition-all active:scale-[0.99] cursor-pointer',
-              capturePhase === 'recording'
-                ? 'bg-rose-500 hover:bg-rose-400 text-white'
-                : capturePhase === 'countdown'
-                ? 'bg-amber-500 text-slate-950'
-                : cameraActive
-                ? 'bg-cyan-500 hover:bg-cyan-400 text-slate-950 shadow-lg shadow-cyan-500/20'
-                : 'bg-slate-800 text-slate-400'
-            )}
-          >
-            {capturePhase === 'idle' ? (
-              <>
-                <Circle className="w-4 h-4 fill-current" />
-                <span>Record 2s Clip ({selectedLabel?.name ?? 'NSL Sign'})</span>
-              </>
-            ) : capturePhase === 'countdown' ? (
-              <>
-                <X className="w-4 h-4" />
-                <span>Cancel ({countdownLeft}s)</span>
-              </>
-            ) : (
-              <>
-                <Square className="w-4 h-4 fill-current" />
-                <span>Recording… ({capturedFramesCount} frames)</span>
-              </>
-            )}
-          </button>
+        {/* Clip Duration Selector & Capture Action Bar */}
+        <div className="space-y-2">
+          <div className="flex items-center justify-between px-1">
+            <span className="text-[11px] font-semibold text-slate-400">
+              Clip window (min {NSL_MIN_RAW_FRAMES}+ tracked frames)
+            </span>
+            <div className="inline-flex items-center gap-1 p-0.5 rounded-lg bg-[#0c1322] border border-white/[0.08]">
+              {CAPTURE_DURATION_OPTIONS.map((ms) => (
+                <button
+                  key={ms}
+                  type="button"
+                  disabled={capturePhase !== 'idle'}
+                  onClick={() => setCaptureDurationMs(ms)}
+                  className={clsx(
+                    'px-2 py-0.5 rounded-md text-[11px] font-bold transition-colors cursor-pointer disabled:opacity-60',
+                    captureDurationMs === ms
+                      ? 'bg-cyan-500 text-slate-950'
+                      : 'text-slate-300 hover:text-white'
+                  )}
+                >
+                  {ms / 1000}s
+                </button>
+              ))}
+            </div>
+          </div>
 
-          {capturePhase === 'recording' && (
+          <div className="flex items-center gap-2">
             <button
-              onClick={finishRecording}
-              className="px-3.5 py-3 rounded-2xl bg-white/10 border border-white/15 text-xs font-bold text-white cursor-pointer"
+              id="btn-record-nsl-clip"
+              onClick={handleStartCapture}
+              className={clsx(
+                'flex-1 py-3 px-4 rounded-2xl font-bold text-sm flex items-center justify-center gap-2 transition-all active:scale-[0.99] cursor-pointer',
+                capturePhase === 'recording'
+                  ? 'bg-rose-500 hover:bg-rose-400 text-white'
+                  : capturePhase === 'countdown'
+                  ? 'bg-amber-500 text-slate-950'
+                  : cameraActive
+                  ? 'bg-cyan-500 hover:bg-cyan-400 text-slate-950 shadow-lg shadow-cyan-500/20'
+                  : 'bg-slate-800 text-slate-400'
+              )}
             >
-              Finish
+              {capturePhase === 'idle' ? (
+                <>
+                  <Circle className="w-4 h-4 fill-current" />
+                  <span>
+                    Record {captureDurationMs / 1000}s Clip ({selectedLabel?.name ?? 'NSL Sign'})
+                  </span>
+                </>
+              ) : capturePhase === 'countdown' ? (
+                <>
+                  <X className="w-4 h-4" />
+                  <span>Cancel ({countdownLeft}s)</span>
+                </>
+              ) : captureExtending ? (
+                <>
+                  <Square className="w-4 h-4 fill-current" />
+                  <span>
+                    Waiting for frames… ({capturedFramesCount}/{NSL_MIN_RAW_FRAMES})
+                  </span>
+                </>
+              ) : (
+                <>
+                  <Square className="w-4 h-4 fill-current" />
+                  <span>Recording… ({capturedFramesCount} frames)</span>
+                </>
+              )}
             </button>
-          )}
+
+            {capturePhase === 'recording' && (
+              <button
+                onClick={finishRecording}
+                className="px-3.5 py-3 rounded-2xl bg-white/10 border border-white/15 text-xs font-bold text-white cursor-pointer"
+              >
+                Finish
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Live Hand Status Hint */}
@@ -1021,11 +1103,17 @@ export function NslCollectStudio({ standalone = false }: NslCollectStudioProps) 
               <Hand
                 className={clsx(
                   'w-4 h-4',
-                  handsVisibleLive ? 'text-emerald-400' : 'text-slate-500'
+                  !trackerReady
+                    ? 'text-amber-400 animate-pulse'
+                    : handsVisibleLive
+                    ? 'text-emerald-400'
+                    : 'text-slate-500'
                 )}
               />
               <span>
-                {handsVisibleLive
+                {!trackerReady
+                  ? 'Warming up AI hand & body tracker...'
+                  : handsVisibleLive
                   ? 'Signing hands detected cleanly'
                   : 'Position torso and signing hands inside frame'}
               </span>
