@@ -1,0 +1,22 @@
+name: Supabase NSL Database Keep-Alive
+
+on:
+  schedule:
+    # Runs every 3 days at 08:15 UTC to prevent Supabase Free Tier 7-day auto-pause
+    - cron: '15 8 */3 * *'
+  workflow_dispatch:
+
+jobs:
+  ping-supabase:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Query NSL Data Studio summary endpoint
+        env:
+          COLLECT_BASE_URL: ${{ vars.NSL_COLLECT_URL || 'https://signbridge-collect.vercel.app' }}
+        run: |
+          echo "Pinging ${COLLECT_BASE_URL}/api/nsl/samples?mode=summary ..."
+          RESPONSE=$(curl -sS --fail-with-body --max-time 25 "${COLLECT_BASE_URL}/api/nsl/samples?mode=summary")
+          echo "Response: ${RESPONSE}"
+          echo "${RESPONSE}" | jq -e '.cloudConfigured == true' > /dev/null
+          echo "Supabase NSL database confirmed active."

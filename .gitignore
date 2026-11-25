@@ -39,3 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local NSL training cache & raw dataset dumps
+/.cache/
+/data/

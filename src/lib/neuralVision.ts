@@ -300,14 +300,59 @@ class NeuralVisionService {
       // 2. Process High-Precision Hands (21 3D joints per hand)
       if (this.handLandmarker) {
         const handResult = this.handLandmarker.detectForVideo(video, safeTimestamp);
-        if (handResult?.landmarks?.length > 0) {
+        const detectedHands: NormalizedPoint[][] = handResult?.landmarks ?? [];
+        if (detectedHands.length > 0) {
           frameResult.isSigningActive = true;
 
-          handResult.landmarks.forEach((handPoints: NormalizedPoint[], idx: number) => {
-            const handedness = handResult.handednesses?.[idx]?.[0]?.categoryName;
-            if (handedness === 'Left') {
+          const poseLeftWrist = frameResult.poseLandmarks[15];
+          const poseRightWrist = frameResult.poseLandmarks[16];
+          const hasLeftWrist = Boolean(
+            poseLeftWrist &&
+              Number.isFinite(poseLeftWrist.x) &&
+              Number.isFinite(poseLeftWrist.y) &&
+              (poseLeftWrist.visibility ?? 1) >= 0.25
+          );
+          const hasRightWrist = Boolean(
+            poseRightWrist &&
+              Number.isFinite(poseRightWrist.x) &&
+              Number.isFinite(poseRightWrist.y) &&
+              (poseRightWrist.visibility ?? 1) >= 0.25
+          );
+
+          const inferSide = (handPoints: NormalizedPoint[], idx: number): 'left' | 'right' => {
+            // MediaPipe HandLandmarker assumes selfie-mirrored input; on raw unmirrored <video>,
+            // category 'Right' corresponds to the subject's anatomical left hand (pose[15]).
+            const rawCat =
+              handResult.handedness?.[idx]?.[0]?.categoryName ??
+              handResult.handednesses?.[idx]?.[0]?.categoryName;
+            const fallback: 'left' | 'right' =
+              rawCat === 'Right'
+                ? 'left'
+                : rawCat === 'Left'
+                ? 'right'
+                : (handPoints[0]?.x ?? 0.5) >= 0.5
+                ? 'left'
+                : 'right';
+
+            if (hasLeftWrist && hasRightWrist && handPoints[0]) {
+              const dLeft = Math.hypot(
+                handPoints[0].x - poseLeftWrist.x,
+                handPoints[0].y - poseLeftWrist.y
+              );
+              const dRight = Math.hypot(
+                handPoints[0].x - poseRightWrist.x,
+                handPoints[0].y - poseRightWrist.y
+              );
+              if (Math.abs(dLeft - dRight) > 0.04) {
+                return dLeft < dRight ? 'left' : 'right';
+              }
+            }
+            return fallback;
+          };
+
+          const assignHand = (side: 'left' | 'right', handPoints: NormalizedPoint[]) => {
+            if (side === 'left') {
               frameResult.leftHandLandmarks = handPoints;
-              // Add index fingertip (8) to kinetic motion trail
               if (handPoints[8]) {
                 this.leftHandTrail.push(handPoints[8]);
                 if (this.leftHandTrail.length > 8) this.leftHandTrail.shift();
@@ -319,7 +364,40 @@ class NeuralVisionService {
                 if (this.rightHandTrail.length > 8) this.rightHandTrail.shift();
               }
             }
-          });
+          };
+
+          if (detectedHands.length === 1) {
+            assignHand(inferSide(detectedHands[0], 0), detectedHands[0]);
+          } else {
+            const h0 = detectedHands[0];
+            const h1 = detectedHands[1];
+            let h0Side: 'left' | 'right' | null = null;
+
+            if (hasLeftWrist && hasRightWrist && h0[0] && h1[0]) {
+              const costH0Left =
+                Math.hypot(h0[0].x - poseLeftWrist.x, h0[0].y - poseLeftWrist.y) +
+                Math.hypot(h1[0].x - poseRightWrist.x, h1[0].y - poseRightWrist.y);
+              const costH0Right =
+                Math.hypot(h0[0].x - poseRightWrist.x, h0[0].y - poseRightWrist.y) +
+                Math.hypot(h1[0].x - poseLeftWrist.x, h1[0].y - poseLeftWrist.y);
+              if (Math.abs(costH0Left - costH0Right) > 0.02) {
+                h0Side = costH0Left <= costH0Right ? 'left' : 'right';
+              }
+            }
+
+            if (!h0Side) {
+              const s0 = inferSide(h0, 0);
+              const s1 = inferSide(h1, 1);
+              if (s0 !== s1) {
+                h0Side = s0;
+              } else {
+                h0Side = (h0[0]?.x ?? 0.5) >= (h1[0]?.x ?? 0.5) ? 'left' : 'right';
+              }
+            }
+
+            assignHand(h0Side, h0);
+            assignHand(h0Side === 'left' ? 'right' : 'left', h1);
+          }
         }
       }
     } catch {

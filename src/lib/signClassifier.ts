@@ -4,15 +4,17 @@ import {
   NSL_MIN_RAW_FRAMES,
   NSL_SEQUENCE_LENGTH,
   resampleNslSequence,
+  trimActiveNslFrames,
 } from '@/lib/nslFeatures';
 import type { TrackingFrame } from '@/lib/neuralVision';
 import {
   computeSequenceMotionStats,
-  extractSequenceDescriptor,
   getCachedBundledModel,
+  getVisibleModelClasses,
   loadBundledDefaultModel,
   loadTrainedModel,
-  predictDescriptor,
+  NSL_IDLE_CLASS_ID,
+  predictSequence,
   type NslPredictionCandidate,
   type NslTrainedModel,
 } from '@/lib/nslModel';
@@ -50,12 +52,12 @@ export interface ClassifierThresholds {
 
 const DEFAULT_THRESHOLDS: ClassifierThresholds = {
   minHandCoverage: 0.35,
-  minConfidence: 0.6,
-  minMargin: 0.16,
-  minCosineSimilarity: 0.42,
-  maxZRms: 2.6,
-  windowMs: 1500,
-  evalIntervalMs: 240,
+  minConfidence: 0.56,
+  minMargin: 0.14,
+  minCosineSimilarity: 0.38,
+  maxZRms: 2.8,
+  windowMs: 1800,
+  evalIntervalMs: 220,
   consensusCount: 2,
   cooldownMs: 2600,
 };
@@ -67,7 +69,8 @@ interface BufferedFrame {
 
 /**
  * On-device real-time NSL sign classifier operating over normalized 30x145 landmark clips
- * and live sliding-window camera streams with temporal consensus debouncing.
+ * and live sliding-window camera streams with active-gesture trimming, chirality invariance,
+ * `_idle` background rejection, and temporal consensus debouncing.
  */
 export class SignClassifier {
   private model: NslTrainedModel | null;
@@ -123,7 +126,7 @@ export class SignClassifier {
   }
 
   isReady(): boolean {
-    return this.model !== null && this.model.classes.length >= 2;
+    return this.model !== null && getVisibleModelClasses(this.model).length >= 2;
   }
 
   reset(): void {
@@ -139,7 +142,7 @@ export class SignClassifier {
 
   /** Classifies a single resampled [30 x 145] NSL landmark sequence. */
   classifySequence(sequence: number[][]): SignClassificationResult {
-    if (!this.model || this.model.classes.length < 2) {
+    if (!this.model || getVisibleModelClasses(this.model).length < 2) {
       return {
         status: 'no_model',
         labelId: null,
@@ -182,16 +185,29 @@ export class SignClassifier {
       };
     }
 
-    const descriptor = extractSequenceDescriptor(sequence);
-    const out = predictDescriptor(this.model, descriptor);
+    const out = predictSequence(this.model, sequence);
     const topClass = this.model.classes[out.topIndex];
+
+    // Explicitly suppress background/non-signing idle class
+    if (!topClass || topClass.id === NSL_IDLE_CLASS_ID) {
+      return {
+        status: 'uncertain',
+        labelId: null,
+        labelName: null,
+        confidence: Math.round(out.confidence * 1000) / 1000,
+        margin: Math.round(out.margin * 1000) / 1000,
+        cosineSimilarity: Math.round(out.cosineSimilarity * 1000) / 1000,
+        handCoverage: Math.round(motion.handCoverage * 1000) / 1000,
+        candidates: out.candidates,
+      };
+    }
 
     const passesConfidence = out.confidence >= this.thresholds.minConfidence;
     const passesMargin = out.margin >= this.thresholds.minMargin;
     const passesCosine = out.cosineSimilarity >= this.thresholds.minCosineSimilarity;
     const passesZRange = out.zRms <= this.thresholds.maxZRms;
 
-    if (passesConfidence && passesMargin && passesCosine && passesZRange && topClass) {
+    if (passesConfidence && passesMargin && passesCosine && passesZRange) {
       return {
         status: 'recognized',
         labelId: topClass.id,
@@ -238,7 +254,6 @@ export class SignClassifier {
       };
     }
 
-    // Handle camera restart / non-monotonic frame clocks cleanly.
     if (this.prevFrame && frame.timestamp < this.prevFrame.timestamp) {
       this.reset();
     }
@@ -272,10 +287,11 @@ export class SignClassifier {
     }
 
     this.lastEvalTimestamp = frame.timestamp;
-    const resampled = resampleNslSequence(
+    const activeWindow = trimActiveNslFrames(
       this.buffer.map((entry) => entry.vector),
-      NSL_SEQUENCE_LENGTH
+      NSL_MIN_RAW_FRAMES
     );
+    const resampled = resampleNslSequence(activeWindow, NSL_SEQUENCE_LENGTH);
     const result = this.classifySequence(resampled);
     this.lastResult = result;
 

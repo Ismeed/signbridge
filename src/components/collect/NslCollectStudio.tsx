@@ -31,6 +31,7 @@ import {
   NSL_MIN_RAW_FRAMES,
   NSL_SEQUENCE_LENGTH,
   resampleNslSequence,
+  trimActiveNslFrames,
   type NslFrameFeatures,
 } from '@/lib/nslFeatures';
 import {
@@ -53,6 +54,7 @@ import {
 } from '@/lib/nslDataset';
 import {
   clearTrainedModel,
+  getVisibleModelClasses,
   loadTrainedModel,
   parseImportedModelJson,
   saveTrainedModel,
@@ -284,7 +286,8 @@ export function NslCollectStudio({ standalone = false }: NslCollectStudioProps) 
       return;
     }
 
-    const resampled = resampleNslSequence(capturedVectors, NSL_SEQUENCE_LENGTH);
+    const activeVectors = trimActiveNslFrames(capturedVectors, NSL_MIN_RAW_FRAMES);
+    const resampled = resampleNslSequence(activeVectors, NSL_SEQUENCE_LENGTH);
     const activeLabel = selectedLabelRef.current;
     const currentSigner = signerInputRef.current.trim();
     const result = saveNslSample({
@@ -696,7 +699,7 @@ export function NslCollectStudio({ standalone = false }: NslCollectStudioProps) 
           : 'clip-split val';
       setStatusBanner({
         tone: 'success',
-        message: `Trained team model on ${combinedSamples.length} clips across ${trained.model.classes.length} signs (${valPct}% ${splitLabel}).`,
+        message: `Trained team model on ${combinedSamples.length} clips across ${getVisibleModelClasses(trained.model).length} signs (${valPct}% ${splitLabel}).`,
       });
     } catch {
       setStatusBanner({
@@ -726,7 +729,7 @@ export function NslCollectStudio({ standalone = false }: NslCollectStudioProps) 
     const trainPct = Math.round(result.model.metrics.trainAccuracy * 100);
     setStatusBanner({
       tone: 'success',
-      message: `Trained local model on ${result.model.classes.length} signs (Val ${valPct}%, Train ${trainPct}%).`,
+      message: `Trained local model on ${getVisibleModelClasses(result.model).length} signs (Val ${valPct}%, Train ${trainPct}%).`,
     });
   };
 
@@ -736,7 +739,7 @@ export function NslCollectStudio({ standalone = false }: NslCollectStudioProps) 
     triggerJsonDownload(`signbridge-nsl-model-${dateStamp}.json`, serializeModelJson(trainedModel));
     setStatusBanner({
       tone: 'success',
-      message: `Exported NSL model weights (${trainedModel.classes.length} signs).`,
+      message: `Exported NSL model weights (${getVisibleModelClasses(trainedModel).length} signs).`,
     });
   };
 
@@ -761,7 +764,7 @@ export function NslCollectStudio({ standalone = false }: NslCollectStudioProps) 
       setTrainedModel(parsed.model);
       setStatusBanner({
         tone: 'success',
-        message: `Loaded NSL model covering ${parsed.model.classes.length} signs.`,
+        message: `Loaded NSL model covering ${getVisibleModelClasses(parsed.model).length} signs.`,
       });
     } catch {
       setStatusBanner({ tone: 'error', message: 'Failed to read selected model JSON file.' });
@@ -1313,7 +1316,7 @@ export function NslCollectStudio({ standalone = false }: NslCollectStudioProps) 
             </div>
             {trainedModel ? (
               <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-[10px] font-semibold text-emerald-300">
-                Ready • {trainedModel.classes.length} signs
+                Ready • {getVisibleModelClasses(trainedModel).length} signs
               </span>
             ) : (
               <span className="text-[10px] text-slate-500">Not trained</span>
@@ -1331,7 +1334,7 @@ export function NslCollectStudio({ standalone = false }: NslCollectStudioProps) 
                   : ' • Clip-Split Val'}
               </p>
               <p className="text-[10px] text-slate-400 truncate">
-                Classes: {trainedModel.classes.map((c) => c.name).join(', ')}
+                Classes: {getVisibleModelClasses(trainedModel).map((c) => c.name).join(', ')}
               </p>
             </div>
           ) : (
