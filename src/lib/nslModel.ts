@@ -1,13 +1,16 @@
 import {
+  mirrorNslSequence,
   NSL_FEATURE_DIM,
   NSL_FEATURE_VERSION,
   NSL_SEQUENCE_LENGTH,
   resampleNslSequence,
+  trimActiveNslFrames,
 } from '@/lib/nslFeatures';
 import { normalizeSignerTag, type NslRecordedSample } from '@/lib/nslDataset';
 
-export const NSL_MODEL_STORAGE_KEY = 'signbridge_nsl_trained_model_v1';
-export const NSL_DESCRIPTOR_DIM = NSL_FEATURE_DIM * 4;
+export const NSL_MODEL_STORAGE_KEY = 'signbridge_nsl_trained_model_v2';
+export const NSL_IDLE_CLASS_ID = '__idle__';
+export const NSL_DESCRIPTOR_DIM = NSL_FEATURE_DIM * 5;
 const NSL_MODEL_EVENT = 'signbridge:nsl-model';
 
 const PRESENCE_DIMS = new Set<number>([0, 15, 78]);
@@ -26,19 +29,22 @@ export interface NslModelMetrics {
   valAccuracy: number;
   splitStrategy?: 'signer-grouped' | 'stratified-clip';
   epochs: number;
+  bestEpoch?: number;
   finalLoss: number;
+  bestValLoss?: number;
   lossHistory: number[];
   trainedAt: string;
 }
 
 export interface NslTrainedModel {
   schema: 'signbridge-nsl-model';
-  version: 1;
+  version: 2;
   featureVersion: typeof NSL_FEATURE_VERSION;
   featureDim: number;
   sequenceLength: number;
   descriptorDim: number;
   hiddenDim: number;
+  hiddenDim2: number;
   classes: NslModelClass[];
   scaler: {
     mean: number[];
@@ -49,6 +55,8 @@ export interface NslTrainedModel {
     b1: number[];
     w2: number[];
     b2: number[];
+    w3: number[];
+    b3: number[];
   };
   centroids: number[][];
   metrics: NslModelMetrics;
@@ -57,6 +65,8 @@ export interface NslTrainedModel {
 export interface SequenceMotionStats {
   handCoverage: number;
   wristMotion: number;
+  leftActivity: number;
+  rightActivity: number;
 }
 
 export interface NslPredictionCandidate {
@@ -78,10 +88,14 @@ export interface NslForwardOutput {
 
 export interface TrainNslOptions {
   hiddenDim?: number;
+  hiddenDim2?: number;
   epochs?: number;
   learningRate?: number;
   weightDecay?: number;
+  dropoutRate?: number;
+  labelSmoothing?: number;
   augmentFactor?: number;
+  sampleWeights?: Record<string, number>;
   seed?: number;
 }
 
@@ -106,8 +120,8 @@ function emitModelChanged(): void {
   }
 }
 
-function round5(value: number): number {
-  return Math.round(value * 100000) / 100000;
+function round4(value: number): number {
+  return Math.round(value * 10000) / 10000;
 }
 
 function createPrng(seed: number): () => number {
@@ -127,19 +141,36 @@ function gaussianNoise(rand: () => number): number {
   return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
 }
 
-/** Measures active signing hand visibility and average wrist velocity over a clip. */
+/** Returns user-facing sign classes (excluding internal `__idle__` rejection class). */
+export function getVisibleModelClasses(model: NslTrainedModel | null | undefined): NslModelClass[] {
+  if (!model) return [];
+  return model.classes.filter((cls) => cls.id !== NSL_IDLE_CLASS_ID);
+}
+
+/** Measures active signing hand visibility, wrist velocity, and per-hand dominance over a clip. */
 export function computeSequenceMotionStats(sequence: number[][]): SequenceMotionStats {
   if (sequence.length === 0) {
-    return { handCoverage: 0, wristMotion: 0 };
+    return { handCoverage: 0, wristMotion: 0, leftActivity: 0, rightActivity: 0 };
   }
 
   let handFrames = 0;
   let motionAccum = 0;
+  let leftActivity = 0;
+  let rightActivity = 0;
 
   for (const row of sequence) {
-    if ((row[15] ?? 0) >= 0.5 || (row[78] ?? 0) >= 0.5) {
+    const hasL = (row[15] ?? 0) >= 0.5;
+    const hasR = (row[78] ?? 0) >= 0.5;
+    if (hasL || hasR) {
       handFrames += 1;
     }
+
+    const lSpeed = Math.hypot(row[141] ?? 0, row[142] ?? 0);
+    const rSpeed = Math.hypot(row[143] ?? 0, row[144] ?? 0);
+
+    if (hasL) leftActivity += 1 + lSpeed * 4;
+    if (hasR) rightActivity += 1 + rSpeed * 4;
+
     let speedSq = 0;
     for (const dim of WRIST_MOTION_DIMS) {
       const val = row[dim] ?? 0;
@@ -151,26 +182,38 @@ export function computeSequenceMotionStats(sequence: number[][]): SequenceMotion
   return {
     handCoverage: handFrames / sequence.length,
     wristMotion: motionAccum / sequence.length,
+    leftActivity: leftActivity / sequence.length,
+    rightActivity: rightActivity / sequence.length,
   };
 }
 
+/** Aligns dominant hand activity to the right-hand slot for prototype centroid averaging. */
+export function alignDominantRight(sequence: number[][]): number[][] {
+  const stats = computeSequenceMotionStats(sequence);
+  return stats.leftActivity > stats.rightActivity + 0.02 ? mirrorNslSequence(sequence) : sequence;
+}
+
 /**
- * Summarizes a [30 x 145] NSL feature clip into a fixed 580-dim spatio-temporal vector:
- * 3 temporal-third segment means (Start/Mid/End) + global per-dimension std dev.
+ * Summarizes a [30 x 145] NSL feature clip into a fixed 725-dim spatio-temporal vector:
+ * 4 temporal-quartile segment means (Q1/Q2/Q3/Q4 -> [0..579]) + whole-clip std dev ([580..724]).
  */
 export function extractSequenceDescriptor(sequence: number[][]): number[] {
   const descriptor = new Array<number>(NSL_DESCRIPTOR_DIM).fill(0);
   if (sequence.length === 0) return descriptor;
 
-  const third = Math.max(1, Math.floor(sequence.length / 3));
+  const len = sequence.length;
+  const q1 = Math.max(1, Math.floor(len * 0.25));
+  const q2 = Math.max(q1 + 1, Math.floor(len * 0.5));
+  const q3 = Math.max(q2 + 1, Math.floor(len * 0.75));
   const bounds: Array<[number, number]> = [
-    [0, third],
-    [third, Math.min(sequence.length, third * 2)],
-    [Math.min(sequence.length, third * 2), sequence.length],
+    [0, q1],
+    [q1, Math.min(len, q2)],
+    [Math.min(len, q2), Math.min(len, q3)],
+    [Math.min(len, q3), len],
   ];
 
-  // Segment means ([0..434])
-  for (let seg = 0; seg < 3; seg++) {
+  // 4 Quartile segment means ([0..579])
+  for (let seg = 0; seg < 4; seg++) {
     const [start, end] = bounds[seg];
     const count = Math.max(1, end - start);
     const outOffset = seg * NSL_FEATURE_DIM;
@@ -186,23 +229,23 @@ export function extractSequenceDescriptor(sequence: number[][]): number[] {
     }
   }
 
-  // Whole-clip mean & std dev ([435..579])
+  // Whole-clip temporal std dev ([580..724])
   const globalMean = new Array<number>(NSL_FEATURE_DIM).fill(0);
   for (const row of sequence) {
     for (let d = 0; d < NSL_FEATURE_DIM; d++) {
       const val = row[d];
       if (Number.isFinite(val)) {
-        globalMean[d] += val / sequence.length;
+        globalMean[d] += val / len;
       }
     }
   }
 
-  const stdOffset = 3 * NSL_FEATURE_DIM;
+  const stdOffset = 4 * NSL_FEATURE_DIM;
   for (const row of sequence) {
     for (let d = 0; d < NSL_FEATURE_DIM; d++) {
       const val = Number.isFinite(row[d]) ? row[d] : 0;
       const diff = val - globalMean[d];
-      descriptor[stdOffset + d] += (diff * diff) / sequence.length;
+      descriptor[stdOffset + d] += (diff * diff) / len;
     }
   }
 
@@ -213,28 +256,74 @@ export function extractSequenceDescriptor(sequence: number[][]): number[] {
   return descriptor;
 }
 
+function rotate2DPair(row: number[], xIdx: number, yIdx: number, cosA: number, sinA: number): void {
+  const x = row[xIdx] ?? 0;
+  const y = row[yIdx] ?? 0;
+  row[xIdx] = Math.max(-4, Math.min(4, x * cosA - y * sinA));
+  row[yIdx] = Math.max(-4, Math.min(4, x * sinA + y * cosA));
+}
+
+function rotateFrame2D(row: number[], cosA: number, sinA: number): void {
+  if ((row[0] ?? 0) >= 0.5) {
+    for (let cursor = 1; cursor <= 13; cursor += 2) {
+      rotate2DPair(row, cursor, cursor + 1, cosA, sinA);
+    }
+  }
+  for (const handOffset of [15, 78]) {
+    if ((row[handOffset] ?? 0) >= 0.5) {
+      rotate2DPair(row, handOffset + 1, handOffset + 2, cosA, sinA);
+      for (let j = 1; j < 21; j++) {
+        const idx = handOffset + 3 + (j - 1) * 3;
+        rotate2DPair(row, idx, idx + 1, cosA, sinA);
+      }
+    }
+  }
+  rotate2DPair(row, 141, 142, cosA, sinA);
+  rotate2DPair(row, 143, 144, cosA, sinA);
+}
+
 function augmentSequence(sequence: number[][], rand: () => number): number[][] {
-  const len = sequence.length;
-  // Subtle temporal trim/stretch (0.85x .. 1.0x window resampled back to NSL_SEQUENCE_LENGTH)
-  const trimMax = Math.max(1, Math.floor(len * 0.14));
+  // 50% anatomical horizontal mirror (chirality invariance)
+  const base = rand() < 0.5 ? mirrorNslSequence(sequence) : sequence;
+  const len = base.length;
+
+  // Temporal sub-window crop (0.76x .. 1.0x) to bridge 3s studio clips and 1.8s live windows
+  const trimMax = Math.max(1, Math.floor(len * 0.22));
   const startOffset = Math.floor(rand() * (trimMax + 1));
-  const endOffset = len - Math.floor(rand() * (trimMax + 1));
+  const endOffset = len - Math.floor(rand() * (Math.floor(trimMax * 0.7) + 1));
   const safeSlice =
-    endOffset - startOffset >= 8 ? sequence.slice(startOffset, endOffset) : sequence;
+    endOffset - startOffset >= 10 ? base.slice(startOffset, endOffset) : base;
   const warped = resampleNslSequence(safeSlice, NSL_SEQUENCE_LENGTH);
 
-  const scaleFactor = 0.94 + rand() * 0.12;
-  const noiseStd = 0.015;
+  const scaleFactor = 0.91 + rand() * 0.18;
+  const noiseStd = 0.016;
+  const angleRad = (rand() * 2 - 1) * ((8 * Math.PI) / 180);
+  const cosA = Math.cos(angleRad);
+  const sinA = Math.sin(angleRad);
 
-  return warped.map((row) =>
-    row.map((val, dim) => {
+  // Simulate 1-3 frames of MediaPipe motion-blur hand dropout with p=0.28
+  const dropStart = rand() < 0.28 ? Math.floor(rand() * (NSL_SEQUENCE_LENGTH - 2)) : -1;
+  const dropLen = dropStart >= 0 ? 1 + Math.floor(rand() * 2) : 0;
+
+  return warped.map((row, tIdx) => {
+    const out = row.map((val, dim) => {
       if (PRESENCE_DIMS.has(dim)) {
         return val >= 0.5 ? 1 : 0;
       }
       const perturbed = val * scaleFactor + gaussianNoise(rand) * noiseStd;
       return Math.max(-4, Math.min(4, perturbed));
-    })
-  );
+    });
+
+    rotateFrame2D(out, cosA, sinA);
+
+    if (dropStart >= 0 && tIdx >= dropStart && tIdx < dropStart + dropLen) {
+      for (let d = 15; d < 141; d++) {
+        out[d] = 0;
+      }
+    }
+
+    return out;
+  });
 }
 
 function standardizeDescriptor(
@@ -278,35 +367,43 @@ function cosineDot(zVec: Float64Array, unitCentroid: number[]): number {
   return dot / norm;
 }
 
-/** Runs forward neural pass and centroid similarity scoring on a trained model. */
-export function predictDescriptor(
+function forwardStandardized(
   model: NslTrainedModel,
-  descriptor: number[]
-): NslForwardOutput {
+  z: Float64Array
+): { probabilities: number[]; zRms: number } {
   const D = model.descriptorDim;
-  const H = model.hiddenDim;
+  const H1 = model.hiddenDim;
+  const H2 = model.hiddenDim2;
   const C = model.classes.length;
+  const { w1, b1, w2, b2, w3, b3 } = model.weights;
 
-  const z = standardizeDescriptor(descriptor, model.scaler.mean, model.scaler.std);
-  const { w1, b1, w2, b2 } = model.weights;
-
-  const hidden = new Float64Array(H);
-  for (let k = 0; k < H; k++) {
+  const h1 = new Float64Array(H1);
+  for (let k = 0; k < H1; k++) {
     let sum = b1[k];
     const rowOff = k * D;
     for (let d = 0; d < D; d++) {
       sum += z[d] * w1[rowOff + d];
     }
-    hidden[k] = sum > 0 ? sum : 0;
+    h1[k] = sum > 0 ? sum : 0;
+  }
+
+  const h2 = new Float64Array(H2);
+  for (let j = 0; j < H2; j++) {
+    let sum = b2[j];
+    const rowOff = j * H1;
+    for (let k = 0; k < H1; k++) {
+      sum += h1[k] * w2[rowOff + k];
+    }
+    h2[j] = sum > 0 ? sum : 0;
   }
 
   const logits = new Float64Array(C);
   let maxLogit = -Infinity;
   for (let c = 0; c < C; c++) {
-    let sum = b2[c];
-    const rowOff = c * H;
-    for (let k = 0; k < H; k++) {
-      sum += hidden[k] * w2[rowOff + k];
+    let sum = b3[c];
+    const rowOff = c * H2;
+    for (let j = 0; j < H2; j++) {
+      sum += h2[j] * w3[rowOff + j];
     }
     logits[c] = sum;
     if (sum > maxLogit) maxLogit = sum;
@@ -319,11 +416,25 @@ export function predictDescriptor(
     probabilities[c] = e;
     expSum += e;
   }
-
   for (let c = 0; c < C; c++) {
     probabilities[c] /= expSum > 0 ? expSum : 1;
   }
 
+  let zNormSq = 0;
+  for (let d = 0; d < z.length; d++) {
+    zNormSq += z[d] * z[d];
+  }
+  const zRms = Math.sqrt(zNormSq / Math.max(1, z.length));
+
+  return { probabilities, zRms };
+}
+
+function summarizePredictions(
+  model: NslTrainedModel,
+  probabilities: number[],
+  cosineSimilarity: number,
+  zRms: number
+): NslForwardOutput {
   const ranked = model.classes
     .map((cls, idx) => ({
       idx,
@@ -335,14 +446,15 @@ export function predictDescriptor(
 
   const top = ranked[0];
   const second = ranked[1] ?? top;
-  const centroid = model.centroids[top.idx] ?? [];
-  const cosineSimilarity = cosineDot(z, centroid);
 
-  let zNormSq = 0;
-  for (let d = 0; d < z.length; d++) {
-    zNormSq += z[d] * z[d];
-  }
-  const zRms = Math.sqrt(zNormSq / Math.max(1, z.length));
+  const visibleCandidates = ranked
+    .filter((item) => item.id !== NSL_IDLE_CLASS_ID)
+    .slice(0, 3)
+    .map((item) => ({
+      id: item.id,
+      name: item.name,
+      probability: item.probability,
+    }));
 
   return {
     probabilities,
@@ -352,27 +464,95 @@ export function predictDescriptor(
     margin: ranked.length > 1 ? top.probability - second.probability : top.probability,
     cosineSimilarity,
     zRms,
-    candidates: ranked.slice(0, 3).map((item) => ({
-      id: item.id,
-      name: item.name,
-      probability: item.probability,
-    })),
+    candidates: visibleCandidates,
   };
 }
 
-function evaluateSplitAccuracy(
+/** Runs forward neural pass and centroid similarity scoring on a single descriptor. */
+export function predictDescriptor(
   model: NslTrainedModel,
-  items: Array<{ descriptor: number[]; classIdx: number }>
-): number {
-  if (items.length === 0) return 0;
+  descriptor: number[]
+): NslForwardOutput {
+  const z = standardizeDescriptor(descriptor, model.scaler.mean, model.scaler.std);
+  const { probabilities, zRms } = forwardStandardized(model, z);
+
+  let topIdx = 0;
+  for (let c = 1; c < probabilities.length; c++) {
+    if (probabilities[c] > probabilities[topIdx]) topIdx = c;
+  }
+  const centroid = model.centroids[topIdx] ?? [];
+  const cosineSimilarity = cosineDot(z, centroid);
+
+  return summarizePredictions(model, probabilities, cosineSimilarity, zRms);
+}
+
+/**
+ * Runs chirality-invariant test-time ensembled inference over `sequence` and `mirrorNslSequence(sequence)`,
+ * guaranteeing identical accuracy for left-handed/right-handed signers and front/rear cameras.
+ */
+export function predictSequence(
+  model: NslTrainedModel,
+  sequence: number[][]
+): NslForwardOutput {
+  const descOrig = extractSequenceDescriptor(sequence);
+  const descMirr = extractSequenceDescriptor(mirrorNslSequence(sequence));
+
+  const zOrig = standardizeDescriptor(descOrig, model.scaler.mean, model.scaler.std);
+  const zMirr = standardizeDescriptor(descMirr, model.scaler.mean, model.scaler.std);
+
+  const outOrig = forwardStandardized(model, zOrig);
+  const outMirr = forwardStandardized(model, zMirr);
+
+  const C = model.classes.length;
+  const probabilities = new Array<number>(C);
+  let topIdx = 0;
+  for (let c = 0; c < C; c++) {
+    const avg = 0.5 * (outOrig.probabilities[c] + outMirr.probabilities[c]);
+    probabilities[c] = avg;
+    if (avg > probabilities[topIdx]) topIdx = c;
+  }
+
+  const centroid = model.centroids[topIdx] ?? [];
+  const cosOrig = cosineDot(zOrig, centroid);
+  const cosMirr = cosineDot(zMirr, centroid);
+  const cosineSimilarity = Math.max(cosOrig, cosMirr);
+  const zRms = 0.5 * (outOrig.zRms + outMirr.zRms);
+
+  return summarizePredictions(model, probabilities, cosineSimilarity, zRms);
+}
+
+function evaluateSplitMetrics(
+  model: NslTrainedModel,
+  items: Array<{ zOrig: Float64Array; zMirr: Float64Array; classIdx: number }>
+): { accuracy: number; loss: number } {
+  if (items.length === 0) return { accuracy: 0, loss: 0 };
   let correct = 0;
+  let lossSum = 0;
+
   for (const item of items) {
-    const out = predictDescriptor(model, item.descriptor);
-    if (out.topIndex === item.classIdx) {
+    const a = forwardStandardized(model, item.zOrig);
+    const b = forwardStandardized(model, item.zMirr);
+    let topIdx = 0;
+    let topProb = -1;
+    for (let c = 0; c < a.probabilities.length; c++) {
+      const p = 0.5 * (a.probabilities[c] + b.probabilities[c]);
+      if (p > topProb) {
+        topProb = p;
+        topIdx = c;
+      }
+      if (c === item.classIdx) {
+        lossSum += -Math.log(Math.max(p, 1e-7));
+      }
+    }
+    if (topIdx === item.classIdx) {
       correct += 1;
     }
   }
-  return Math.round((correct / items.length) * 1000) / 1000;
+
+  return {
+    accuracy: Math.round((correct / items.length) * 1000) / 1000,
+    loss: Math.round((lossSum / items.length) * 10000) / 10000,
+  };
 }
 
 class AdamBuffer {
@@ -398,19 +578,19 @@ class AdamBuffer {
     const biasCorr2 = 1 - Math.pow(beta2, stepNum);
 
     for (let i = 0; i < params.length; i++) {
-      const g = grads[i] + weightDecay * params[i];
+      const g = grads[i];
       this.m[i] = beta1 * this.m[i] + (1 - beta1) * g;
       this.v[i] = beta2 * this.v[i] + (1 - beta2) * g * g;
       const mHat = this.m[i] / biasCorr1;
       const vHat = this.v[i] / biasCorr2;
-      params[i] -= (lr * mHat) / (Math.sqrt(vHat) + eps);
+      params[i] = params[i] * (1 - lr * weightDecay) - (lr * mHat) / (Math.sqrt(vHat) + eps);
     }
   }
 }
 
 /**
- * Trains an on-device 2-layer neural sequence classifier + class centroids on NSL clips.
- * Requires at least 2 distinct sign classes with at least 2 clips per class.
+ * Trains an on-device 2-hidden-layer neural sequence classifier + dominant-aligned centroids on NSL clips.
+ * Features chirality pairing, sub-window/rotation/dropout augmentation, label smoothing, and best-val checkpointing.
  */
 export function trainNslModel(
   samples: NslRecordedSample[],
@@ -424,7 +604,6 @@ export function trainNslModel(
       s.sequence.length === NSL_SEQUENCE_LENGTH
   );
 
-  // Group by sign label
   const grouped = new Map<string, { name: string; items: NslRecordedSample[] }>();
   for (const sample of validSamples) {
     const bucket = grouped.get(sample.labelId);
@@ -439,7 +618,8 @@ export function trainNslModel(
     .filter(([, group]) => group.items.length >= 2)
     .sort(([a], [b]) => a.localeCompare(b));
 
-  if (eligibleClasses.length < 2) {
+  const visibleEligibleCount = eligibleClasses.filter(([id]) => id !== NSL_IDLE_CLASS_ID).length;
+  if (visibleEligibleCount < 2) {
     return {
       ok: false,
       error:
@@ -452,17 +632,29 @@ export function trainNslModel(
     name: group.name,
   }));
 
-  const rand = createPrng(options.seed ?? 20261114);
-  const hiddenDim = Math.max(16, Math.min(128, options.hiddenDim ?? 48));
+  const rand = createPrng(options.seed ?? 20261125);
+  const isSmallDataset = validSamples.length < 80;
+  const H1 = Math.max(24, Math.min(192, options.hiddenDim ?? (isSmallDataset ? 64 : 112)));
+  const H2 = Math.max(16, Math.min(128, options.hiddenDim2 ?? (isSmallDataset ? 32 : 64)));
   const epochs = Math.max(20, Math.min(300, options.epochs ?? 110));
-  const baseLr = options.learningRate ?? 0.014;
-  const weightDecay = options.weightDecay ?? 2e-4;
+  const baseLr = options.learningRate ?? 0.0035;
+  const weightDecay = options.weightDecay ?? 3e-4;
+  const dropoutRate = Math.max(0, Math.min(0.5, options.dropoutRate ?? 0.22));
+  const labelSmoothing = Math.max(0, Math.min(0.2, options.labelSmoothing ?? 0.04));
   const augmentFactor = options.augmentFactor ?? 4;
 
   // Prefer signer-grouped validation split when >= 2 distinct named signers contributed
-  // to a class so validation measures cross-signer generalization instead of clip memorization.
-  const trainRaw: Array<{ sample: NslRecordedSample; classIdx: number; descriptor: number[] }> = [];
-  const valRaw: Array<{ sample: NslRecordedSample; classIdx: number; descriptor: number[] }> = [];
+  const trainRaw: Array<{
+    sample: NslRecordedSample;
+    trimmedSeq: number[][];
+    classIdx: number;
+    weight: number;
+  }> = [];
+  const valRaw: Array<{
+    sample: NslRecordedSample;
+    trimmedSeq: number[][];
+    classIdx: number;
+  }> = [];
   const genericSigners = new Set(['local-signer', 'anonymous']);
   let signerSplitClassCount = 0;
 
@@ -482,14 +674,24 @@ export function trainNslModel(
 
     let heldOutIds: Set<string> | null = null;
     if (signerBuckets.size >= 2) {
-      const sortedSigners = Array.from(signerBuckets.entries()).sort((a, b) => {
-        if (a[1].length !== b[1].length) return a[1].length - b[1].length;
-        return a[0].localeCompare(b[0]);
-      });
-      const candidateVal = sortedSigners[0][1];
-      const remainingCount = groupItems.length - candidateVal.length;
-      if (remainingCount >= 1 && candidateVal.length <= Math.floor(groupItems.length * 0.5)) {
-        heldOutIds = new Set(candidateVal.map((item) => item.id));
+      // Prefer an explicit holdout bucket if present, else smallest named signer bucket
+      const explicitHoldout = signerBuckets.get('seed-holdout');
+      if (
+        explicitHoldout &&
+        groupItems.length - explicitHoldout.length >= 1 &&
+        explicitHoldout.length <= Math.floor(groupItems.length * 0.5)
+      ) {
+        heldOutIds = new Set(explicitHoldout.map((item) => item.id));
+      } else {
+        const sortedSigners = Array.from(signerBuckets.entries()).sort((a, b) => {
+          if (a[1].length !== b[1].length) return a[1].length - b[1].length;
+          return a[0].localeCompare(b[0]);
+        });
+        const candidateVal = sortedSigners[0][1];
+        const remainingCount = groupItems.length - candidateVal.length;
+        if (remainingCount >= 1 && candidateVal.length <= Math.floor(groupItems.length * 0.5)) {
+          heldOutIds = new Set(candidateVal.map((item) => item.id));
+        }
       }
     }
 
@@ -506,34 +708,51 @@ export function trainNslModel(
     }
 
     for (const sample of groupItems) {
-      const item = {
-        sample,
-        classIdx,
-        descriptor: extractSequenceDescriptor(sample.sequence),
-      };
-      (valIds.has(sample.id) ? valRaw : trainRaw).push(item);
+      const activeSlice =
+        sample.labelId === NSL_IDLE_CLASS_ID
+          ? sample.sequence
+          : resampleNslSequence(trimActiveNslFrames(sample.sequence, 10), NSL_SEQUENCE_LENGTH);
+      const customWeight = options.sampleWeights?.[sample.id] ?? 1;
+
+      if (valIds.has(sample.id)) {
+        valRaw.push({ sample, trimmedSeq: activeSlice, classIdx });
+      } else {
+        trainRaw.push({
+          sample,
+          trimmedSeq: activeSlice,
+          classIdx,
+          weight: Math.max(0.25, Math.min(5, customWeight)),
+        });
+      }
     }
   }
 
-  // Augment training split ONLY (zero data leakage into validation)
-  const trainAugmented: Array<{ descriptor: number[]; classIdx: number }> = trainRaw.map((item) => ({
-    descriptor: item.descriptor,
-    classIdx: item.classIdx,
-  }));
+  // Build augmented training set (original + exact mirror + stochastic domain augmentations)
+  const trainAugmented: Array<{ descriptor: number[]; classIdx: number; weight: number }> = [];
 
   for (const item of trainRaw) {
+    trainAugmented.push({
+      descriptor: extractSequenceDescriptor(item.trimmedSeq),
+      classIdx: item.classIdx,
+      weight: item.weight,
+    });
+    trainAugmented.push({
+      descriptor: extractSequenceDescriptor(mirrorNslSequence(item.trimmedSeq)),
+      classIdx: item.classIdx,
+      weight: item.weight,
+    });
+
     for (let a = 0; a < augmentFactor; a++) {
-      const augSeq = augmentSequence(item.sample.sequence, rand);
+      const augSeq = augmentSequence(item.trimmedSeq, rand);
       trainAugmented.push({
         descriptor: extractSequenceDescriptor(augSeq),
         classIdx: item.classIdx,
+        weight: item.weight,
       });
     }
   }
 
-  // Standardize across augmented training set
   const D = NSL_DESCRIPTOR_DIM;
-  const H = hiddenDim;
   const C = classes.length;
   const N = trainAugmented.length;
 
@@ -556,65 +775,143 @@ export function trainNslModel(
   const zTrain = trainAugmented.map((row) => ({
     z: standardizeDescriptor(row.descriptor, mean, std),
     y: row.classIdx,
+    weight: row.weight,
   }));
 
-  // Compute normalized class centroids from unaugmented real training clips
+  const evalTrainItems = trainRaw.map((item) => ({
+    zOrig: standardizeDescriptor(extractSequenceDescriptor(item.trimmedSeq), mean, std),
+    zMirr: standardizeDescriptor(
+      extractSequenceDescriptor(mirrorNslSequence(item.trimmedSeq)),
+      mean,
+      std
+    ),
+    classIdx: item.classIdx,
+  }));
+
+  const evalValItems = valRaw.map((item) => ({
+    zOrig: standardizeDescriptor(extractSequenceDescriptor(item.trimmedSeq), mean, std),
+    zMirr: standardizeDescriptor(
+      extractSequenceDescriptor(mirrorNslSequence(item.trimmedSeq)),
+      mean,
+      std
+    ),
+    classIdx: item.classIdx,
+  }));
+
+  // Compute dominant-right-aligned class centroids from unaugmented real training clips
   const centroidSums = Array.from({ length: C }, () => new Float64Array(D));
-  const classCounts = new Array<number>(C).fill(0);
+  const classWeightSums = new Array<number>(C).fill(0);
   for (const item of trainRaw) {
-    const z = standardizeDescriptor(item.descriptor, mean, std);
-    classCounts[item.classIdx] += 1;
+    const alignedSeq = alignDominantRight(item.trimmedSeq);
+    const z = standardizeDescriptor(extractSequenceDescriptor(alignedSeq), mean, std);
+    classWeightSums[item.classIdx] += item.weight;
     for (let d = 0; d < D; d++) {
-      centroidSums[item.classIdx][d] += z[d];
+      centroidSums[item.classIdx][d] += z[d] * item.weight;
     }
   }
   const centroids = centroidSums.map((sumVec, cIdx) => {
-    const cnt = Math.max(1, classCounts[cIdx]);
+    const cnt = Math.max(1e-6, classWeightSums[cIdx]);
     for (let d = 0; d < D; d++) {
       sumVec[d] /= cnt;
     }
-    return normalizeUnit(sumVec).map(round5);
+    return normalizeUnit(sumVec).map(round4);
   });
 
-  // Initialize weights (He for ReLU layer 1, Xavier for softmax layer 2)
-  const w1 = new Float64Array(H * D);
-  const b1 = new Float64Array(H);
-  const w2 = new Float64Array(C * H);
-  const b2 = new Float64Array(C);
+  // Initialize weights (He for ReLU layers 1 & 2, Xavier for softmax layer 3)
+  const w1 = new Float64Array(H1 * D);
+  const b1 = new Float64Array(H1);
+  const w2 = new Float64Array(H2 * H1);
+  const b2 = new Float64Array(H2);
+  const w3 = new Float64Array(C * H2);
+  const b3 = new Float64Array(C);
 
   const scale1 = Math.sqrt(2 / D);
-  for (let i = 0; i < w1.length; i++) {
-    w1[i] = gaussianNoise(rand) * scale1;
-  }
-  const scale2 = Math.sqrt(1 / H);
-  for (let i = 0; i < w2.length; i++) {
-    w2[i] = gaussianNoise(rand) * scale2;
-  }
+  for (let i = 0; i < w1.length; i++) w1[i] = gaussianNoise(rand) * scale1;
+  const scale2 = Math.sqrt(2 / H1);
+  for (let i = 0; i < w2.length; i++) w2[i] = gaussianNoise(rand) * scale2;
+  const scale3 = Math.sqrt(1 / H2);
+  for (let i = 0; i < w3.length; i++) w3[i] = gaussianNoise(rand) * scale3;
 
   const adamW1 = new AdamBuffer(w1.length);
   const adamB1 = new AdamBuffer(b1.length);
   const adamW2 = new AdamBuffer(w2.length);
   const adamB2 = new AdamBuffer(b2.length);
+  const adamW3 = new AdamBuffer(w3.length);
+  const adamB3 = new AdamBuffer(b3.length);
 
   const gradW1 = new Float64Array(w1.length);
   const gradB1 = new Float64Array(b1.length);
   const gradW2 = new Float64Array(w2.length);
   const gradB2 = new Float64Array(b2.length);
+  const gradW3 = new Float64Array(w3.length);
+  const gradB3 = new Float64Array(b3.length);
 
-  const hPre = new Float64Array(H);
-  const hAct = new Float64Array(H);
+  const h1Pre = new Float64Array(H1);
+  const h1Act = new Float64Array(H1);
+  const dropMask1 = new Float64Array(H1);
+  const h2Pre = new Float64Array(H2);
+  const h2Act = new Float64Array(H2);
   const logits = new Float64Array(C);
   const probs = new Float64Array(C);
-  const dH = new Float64Array(H);
+  const dH2 = new Float64Array(H2);
+  const dH1 = new Float64Array(H1);
+
+  const bestW1 = new Float64Array(w1);
+  const bestB1 = new Float64Array(b1);
+  const bestW2 = new Float64Array(w2);
+  const bestB2 = new Float64Array(b2);
+  const bestW3 = new Float64Array(w3);
+  const bestB3 = new Float64Array(b3);
+  let bestValAcc = -1;
+  let bestValLoss = Infinity;
+  let bestEpoch = 0;
 
   const indices = Array.from({ length: N }, (_, idx) => idx);
-  const batchSize = Math.min(16, Math.max(4, N));
+  const batchSize = Math.min(32, Math.max(8, N));
+  const keepProb = 1 - dropoutRate;
+  const smoothPos = 1 - labelSmoothing + labelSmoothing / C;
+  const smoothNeg = labelSmoothing / C;
+
   const lossHistory: number[] = [];
   let adamStep = 0;
   let lastEpochLoss = 0;
 
+  const workingModel: NslTrainedModel = {
+    schema: 'signbridge-nsl-model',
+    version: 2,
+    featureVersion: NSL_FEATURE_VERSION,
+    featureDim: NSL_FEATURE_DIM,
+    sequenceLength: NSL_SEQUENCE_LENGTH,
+    descriptorDim: D,
+    hiddenDim: H1,
+    hiddenDim2: H2,
+    classes,
+    scaler: { mean, std },
+    weights: {
+      w1: [],
+      b1: [],
+      w2: [],
+      b2: [],
+      w3: [],
+      b3: [],
+    },
+    centroids,
+    metrics: {
+      sampleCount: trainRaw.length + valRaw.length,
+      trainCount: trainRaw.length,
+      valCount: valRaw.length,
+      trainAccuracy: 0,
+      valAccuracy: 0,
+      splitStrategy:
+        signerSplitClassCount === eligibleClasses.length ? 'signer-grouped' : 'stratified-clip',
+      epochs,
+      finalLoss: 0,
+      lossHistory,
+      trainedAt: new Date().toISOString(),
+    },
+  };
+
   for (let epoch = 0; epoch < epochs; epoch++) {
-    // Fisher-Yates shuffle
     for (let i = N - 1; i > 0; i--) {
       const j = Math.floor(rand() * (i + 1));
       const tmp = indices[i];
@@ -623,41 +920,72 @@ export function trainNslModel(
     }
 
     const cosineFactor = 0.5 * (1 + Math.cos((Math.PI * epoch) / epochs));
-    const epochLr = baseLr * (0.1 + 0.9 * cosineFactor);
+    const epochLr = baseLr * (0.06 + 0.94 * cosineFactor);
     let epochLossSum = 0;
+    let epochWeightSum = 0;
 
     for (let batchStart = 0; batchStart < N; batchStart += batchSize) {
       const batchEnd = Math.min(N, batchStart + batchSize);
-      const currentBatch = batchEnd - batchStart;
+      let batchWeightSum = 0;
+      for (let b = batchStart; b < batchEnd; b++) {
+        batchWeightSum += zTrain[indices[b]].weight;
+      }
+      batchWeightSum = Math.max(1e-6, batchWeightSum);
 
       gradW1.fill(0);
       gradB1.fill(0);
       gradW2.fill(0);
       gradB2.fill(0);
+      gradW3.fill(0);
+      gradB3.fill(0);
 
       for (let b = batchStart; b < batchEnd; b++) {
         const sample = zTrain[indices[b]];
         const z = sample.z;
         const y = sample.y;
+        const wScale = sample.weight / batchWeightSum;
 
-        // Forward layer 1
-        for (let k = 0; k < H; k++) {
+        // Forward layer 1 + ReLU + inverted dropout
+        for (let k = 0; k < H1; k++) {
           let sum = b1[k];
           const off = k * D;
           for (let d = 0; d < D; d++) {
             sum += z[d] * w1[off + d];
           }
-          hPre[k] = sum;
-          hAct[k] = sum > 0 ? sum : 0;
+          h1Pre[k] = sum;
+          if (sum > 0) {
+            if (dropoutRate > 0) {
+              const keep = rand() < keepProb ? 1 / keepProb : 0;
+              dropMask1[k] = keep;
+              h1Act[k] = sum * keep;
+            } else {
+              dropMask1[k] = 1;
+              h1Act[k] = sum;
+            }
+          } else {
+            dropMask1[k] = 0;
+            h1Act[k] = 0;
+          }
         }
 
-        // Forward layer 2 + softmax
+        // Forward layer 2 + ReLU
+        for (let j = 0; j < H2; j++) {
+          let sum = b2[j];
+          const off = j * H1;
+          for (let k = 0; k < H1; k++) {
+            sum += h1Act[k] * w2[off + k];
+          }
+          h2Pre[j] = sum;
+          h2Act[j] = sum > 0 ? sum : 0;
+        }
+
+        // Forward layer 3 + Softmax
         let maxLogit = -Infinity;
         for (let c = 0; c < C; c++) {
-          let sum = b2[c];
-          const off = c * H;
-          for (let k = 0; k < H; k++) {
-            sum += hAct[k] * w2[off + k];
+          let sum = b3[c];
+          const off = c * H2;
+          for (let j = 0; j < H2; j++) {
+            sum += h2Act[j] * w3[off + j];
           }
           logits[c] = sum;
           if (sum > maxLogit) maxLogit = sum;
@@ -673,28 +1001,43 @@ export function trainNslModel(
           probs[c] /= expSum;
         }
 
-        epochLossSum += -Math.log(Math.max(probs[y], 1e-7));
+        epochLossSum += sample.weight * -Math.log(Math.max(probs[y], 1e-7));
+        epochWeightSum += sample.weight;
+
+        // Backward layer 3 (with label smoothing)
+        dH2.fill(0);
+        for (let c = 0; c < C; c++) {
+          const target = c === y ? smoothPos : smoothNeg;
+          const dLogit = (probs[c] - target) * wScale;
+          gradB3[c] += dLogit;
+          const off = c * H2;
+          for (let j = 0; j < H2; j++) {
+            gradW3[off + j] += dLogit * h2Act[j];
+            dH2[j] += dLogit * w3[off + j];
+          }
+        }
 
         // Backward layer 2
-        dH.fill(0);
-        for (let c = 0; c < C; c++) {
-          const dLogit = (probs[c] - (c === y ? 1 : 0)) / currentBatch;
-          gradB2[c] += dLogit;
-          const off = c * H;
-          for (let k = 0; k < H; k++) {
-            gradW2[off + k] += dLogit * hAct[k];
-            dH[k] += dLogit * w2[off + k];
+        dH1.fill(0);
+        for (let j = 0; j < H2; j++) {
+          if (h2Pre[j] <= 0) continue;
+          const g2 = dH2[j];
+          gradB2[j] += g2;
+          const off = j * H1;
+          for (let k = 0; k < H1; k++) {
+            gradW2[off + k] += g2 * h1Act[k];
+            dH1[k] += g2 * w2[off + k];
           }
         }
 
         // Backward layer 1
-        for (let k = 0; k < H; k++) {
-          if (hPre[k] <= 0) continue;
-          const g = dH[k];
-          gradB1[k] += g;
+        for (let k = 0; k < H1; k++) {
+          if (h1Pre[k] <= 0 || dropMask1[k] === 0) continue;
+          const g1 = dH1[k] * dropMask1[k];
+          gradB1[k] += g1;
           const off = k * D;
           for (let d = 0; d < D; d++) {
-            gradW1[off + d] += g * z[d];
+            gradW1[off + d] += g1 * z[d];
           }
         }
       }
@@ -704,32 +1047,67 @@ export function trainNslModel(
       adamB1.step(b1, gradB1, epochLr, 0, adamStep);
       adamW2.step(w2, gradW2, epochLr, weightDecay, adamStep);
       adamB2.step(b2, gradB2, epochLr, 0, adamStep);
+      adamW3.step(w3, gradW3, epochLr, weightDecay, adamStep);
+      adamB3.step(b3, gradB3, epochLr, 0, adamStep);
     }
 
-    lastEpochLoss = Math.round((epochLossSum / N) * 10000) / 10000;
+    lastEpochLoss = round4(epochLossSum / Math.max(1e-6, epochWeightSum));
     if (epoch % Math.max(1, Math.floor(epochs / 12)) === 0 || epoch === epochs - 1) {
       lossHistory.push(lastEpochLoss);
+    }
+
+    // Evaluate validation checkpoint periodically & across final epochs
+    if (epoch >= Math.floor(epochs * 0.2) && (epoch % 3 === 0 || epoch === epochs - 1)) {
+      workingModel.weights.w1 = w1 as unknown as number[];
+      workingModel.weights.b1 = b1 as unknown as number[];
+      workingModel.weights.w2 = w2 as unknown as number[];
+      workingModel.weights.b2 = b2 as unknown as number[];
+      workingModel.weights.w3 = w3 as unknown as number[];
+      workingModel.weights.b3 = b3 as unknown as number[];
+
+      const valEval = evaluateSplitMetrics(
+        workingModel,
+        evalValItems.length > 0 ? evalValItems : evalTrainItems
+      );
+      const improved =
+        valEval.accuracy > bestValAcc + 1e-4 ||
+        (Math.abs(valEval.accuracy - bestValAcc) <= 1e-4 && valEval.loss < bestValLoss);
+
+      if (improved) {
+        bestValAcc = valEval.accuracy;
+        bestValLoss = valEval.loss;
+        bestEpoch = epoch + 1;
+        bestW1.set(w1);
+        bestB1.set(b1);
+        bestW2.set(w2);
+        bestB2.set(b2);
+        bestW3.set(w3);
+        bestB3.set(b3);
+      }
     }
   }
 
   const candidateModel: NslTrainedModel = {
     schema: 'signbridge-nsl-model',
-    version: 1,
+    version: 2,
     featureVersion: NSL_FEATURE_VERSION,
     featureDim: NSL_FEATURE_DIM,
     sequenceLength: NSL_SEQUENCE_LENGTH,
     descriptorDim: D,
-    hiddenDim: H,
+    hiddenDim: H1,
+    hiddenDim2: H2,
     classes,
     scaler: {
-      mean: mean.map(round5),
-      std: std.map(round5),
+      mean: mean.map(round4),
+      std: std.map(round4),
     },
     weights: {
-      w1: Array.from(w1, round5),
-      b1: Array.from(b1, round5),
-      w2: Array.from(w2, round5),
-      b2: Array.from(b2, round5),
+      w1: Array.from(bestW1, round4),
+      b1: Array.from(bestB1, round4),
+      w2: Array.from(bestW2, round4),
+      b2: Array.from(bestB2, round4),
+      w3: Array.from(bestW3, round4),
+      b3: Array.from(bestB3, round4),
     },
     centroids,
     metrics: {
@@ -741,14 +1119,16 @@ export function trainNslModel(
       splitStrategy:
         signerSplitClassCount === eligibleClasses.length ? 'signer-grouped' : 'stratified-clip',
       epochs,
+      bestEpoch,
       finalLoss: lastEpochLoss,
+      bestValLoss: Number.isFinite(bestValLoss) ? bestValLoss : lastEpochLoss,
       lossHistory,
       trainedAt: new Date().toISOString(),
     },
   };
 
-  candidateModel.metrics.trainAccuracy = evaluateSplitAccuracy(candidateModel, trainRaw);
-  candidateModel.metrics.valAccuracy = evaluateSplitAccuracy(candidateModel, valRaw);
+  candidateModel.metrics.trainAccuracy = evaluateSplitMetrics(candidateModel, evalTrainItems).accuracy;
+  candidateModel.metrics.valAccuracy = evaluateSplitMetrics(candidateModel, evalValItems).accuracy;
 
   return { ok: true, model: candidateModel };
 }
@@ -776,13 +1156,15 @@ export function parseImportedModelJson(rawJson: string): ParseModelResult {
   const m = parsed as Partial<NslTrainedModel>;
   if (
     m.schema !== 'signbridge-nsl-model' ||
-    m.version !== 1 ||
+    m.version !== 2 ||
     m.featureVersion !== NSL_FEATURE_VERSION ||
     m.featureDim !== NSL_FEATURE_DIM ||
     m.sequenceLength !== NSL_SEQUENCE_LENGTH ||
     m.descriptorDim !== NSL_DESCRIPTOR_DIM ||
     typeof m.hiddenDim !== 'number' ||
     m.hiddenDim < 8 ||
+    typeof m.hiddenDim2 !== 'number' ||
+    m.hiddenDim2 < 8 ||
     !Array.isArray(m.classes) ||
     m.classes.length < 2
   ) {
@@ -803,7 +1185,8 @@ export function parseImportedModelJson(rawJson: string): ParseModelResult {
   }
 
   const D = m.descriptorDim;
-  const H = m.hiddenDim;
+  const H1 = m.hiddenDim;
+  const H2 = m.hiddenDim2;
   const C = m.classes.length;
 
   if (
@@ -811,10 +1194,12 @@ export function parseImportedModelJson(rawJson: string): ParseModelResult {
     !isFiniteNumberArray(m.scaler.mean, D) ||
     !isFiniteNumberArray(m.scaler.std, D) ||
     !m.weights ||
-    !isFiniteNumberArray(m.weights.w1, H * D) ||
-    !isFiniteNumberArray(m.weights.b1, H) ||
-    !isFiniteNumberArray(m.weights.w2, C * H) ||
-    !isFiniteNumberArray(m.weights.b2, C) ||
+    !isFiniteNumberArray(m.weights.w1, H1 * D) ||
+    !isFiniteNumberArray(m.weights.b1, H1) ||
+    !isFiniteNumberArray(m.weights.w2, H2 * H1) ||
+    !isFiniteNumberArray(m.weights.b2, H2) ||
+    !isFiniteNumberArray(m.weights.w3, C * H2) ||
+    !isFiniteNumberArray(m.weights.b3, C) ||
     !Array.isArray(m.centroids) ||
     m.centroids.length !== C ||
     !m.centroids.every((row) => isFiniteNumberArray(row, D)) ||
@@ -827,8 +1212,8 @@ export function parseImportedModelJson(rawJson: string): ParseModelResult {
   return { ok: true, model: m as NslTrainedModel };
 }
 
-export function serializeModelJson(model: NslTrainedModel): string {
-  return JSON.stringify(model, null, 2);
+export function serializeModelJson(model: NslTrainedModel, compact = false): string {
+  return compact ? JSON.stringify(model) : JSON.stringify(model, null, 2);
 }
 
 export function saveTrainedModel(
@@ -898,7 +1283,7 @@ export function getCachedBundledModel(): NslTrainedModel | null {
 }
 
 /**
- * Loads optional bundled default NSL model weights from `/models/nsl-model.json` once.
+ * Loads bundled default NSL model weights from `/models/nsl-model.json` once.
  * Returns null quietly if no bundled weights file is deployed yet.
  */
 export function loadBundledDefaultModel(): Promise<NslTrainedModel | null> {

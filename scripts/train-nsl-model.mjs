@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 /**
- * Offline NSL Sequence Classifier Trainer
+ * Offline & Hybrid Cloud NSL Sequence Classifier Trainer
  *
- * Trains the on-device neural NSL model from either:
- *   1. An exported JSON dataset from the /collect Data Studio
- *   2. Directly from the shared Supabase Postgres team dataset (--supabase)
+ * Trains the on-device neural NSL model from:
+ *   1. One or more JSON datasets (e.g. `data/nsl-seed-dataset.json` or `/collect` exports)
+ *   2. Directly from the shared Supabase Postgres team dataset (`--supabase`)
+ *   3. A hybrid merge of seed JSON + live Supabase team clips (`data/nsl-seed-dataset.json --supabase`),
+ *      automatically upweighting native Nigerian contributor clips (2.5x) over seed clips (1.0x).
  *
  * Usage:
- *   npm run train:nsl -- path/to/signbridge-nsl-dataset.json [output-model.json]
- *   npm run train:nsl -- --supabase [output-model.json]
+ *   npm run train:nsl -- data/nsl-seed-dataset.json [--out public/models/nsl-model.json]
+ *   npm run train:nsl -- data/nsl-seed-dataset.json --supabase
+ *   npm run train:nsl -- --supabase
  */
 
 import fs from 'node:fs';
@@ -108,17 +111,45 @@ function loadEnvFiles() {
 
 async function main() {
   const args = process.argv.slice(2);
-  const useSupabase = args.includes('--supabase');
-  const positional = args.filter((arg) => arg !== '--supabase');
+  let useSupabase = false;
+  let outputArg = null;
+  const inputFiles = [];
 
-  if (!useSupabase && positional.length === 0) {
-    console.error(
-      'Usage:\n  node scripts/train-nsl-model.mjs <dataset.json> [public/models/nsl-model.json]\n  node scripts/train-nsl-model.mjs --supabase [public/models/nsl-model.json]'
-    );
-    process.exit(1);
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--supabase') {
+      useSupabase = true;
+    } else if (arg === '--out' || arg === '-o') {
+      outputArg = args[++i] || null;
+    } else {
+      inputFiles.push(arg);
+    }
   }
 
-  const outputArg = useSupabase ? positional[0] : positional[1];
+  // Backward compatibility: `train:nsl dataset.json output-model.json`
+  if (
+    !outputArg &&
+    inputFiles.length === 2 &&
+    inputFiles[1].includes('model') &&
+    !fs.existsSync(path.resolve(process.cwd(), inputFiles[1]))
+  ) {
+    outputArg = inputFiles.pop();
+  } else if (!outputArg && useSupabase && inputFiles.length === 1 && !fs.existsSync(path.resolve(process.cwd(), inputFiles[0]))) {
+    outputArg = inputFiles.pop();
+  }
+
+  if (!useSupabase && inputFiles.length === 0) {
+    const defaultSeed = path.join(REPO_ROOT, 'data', 'nsl-seed-dataset.json');
+    if (fs.existsSync(defaultSeed)) {
+      inputFiles.push(defaultSeed);
+    } else {
+      console.error(
+        'Usage:\n  node scripts/train-nsl-model.mjs <dataset.json> [--out public/models/nsl-model.json]\n  node scripts/train-nsl-model.mjs data/nsl-seed-dataset.json --supabase'
+      );
+      process.exit(1);
+    }
+  }
+
   const outputPath = path.resolve(
     process.cwd(),
     outputArg || path.join(REPO_ROOT, 'public', 'models', 'nsl-model.json')
@@ -127,11 +158,40 @@ async function main() {
   const { parseImportedDatasetJson, countSamplesByLabel, normalizeSignerTag } = loadTsModule(
     path.join(REPO_ROOT, 'src', 'lib', 'nslDataset.ts')
   );
-  const { trainNslModel, serializeModelJson } = loadTsModule(
-    path.join(REPO_ROOT, 'src', 'lib', 'nslModel.ts')
+  const {
+    trainNslModel,
+    serializeModelJson,
+    parseImportedModelJson,
+    predictSequence,
+    getVisibleModelClasses,
+    NSL_IDLE_CLASS_ID,
+  } = loadTsModule(path.join(REPO_ROOT, 'src', 'lib', 'nslModel.ts'));
+  const { trimActiveNslFrames, resampleNslSequence, NSL_SEQUENCE_LENGTH } = loadTsModule(
+    path.join(REPO_ROOT, 'src', 'lib', 'nslFeatures.ts')
   );
 
-  let samples;
+  const mergedById = new Map();
+  const sampleWeights = {};
+
+  for (const relPath of inputFiles) {
+    const fullPath = path.resolve(process.cwd(), relPath);
+    if (!fs.existsSync(fullPath)) {
+      console.error(`Dataset file not found: ${fullPath}`);
+      process.exit(1);
+    }
+    const rawJson = fs.readFileSync(fullPath, 'utf8');
+    const parsed = parseImportedDatasetJson(rawJson);
+    if (!parsed.ok) {
+      console.error(`Invalid dataset (${fullPath}): ${parsed.error}`);
+      process.exit(1);
+    }
+    for (const s of parsed.dataset.samples) {
+      mergedById.set(s.id, s);
+      const isSeed = (s.signerTag || '').startsWith('seed-') || s.id.startsWith('seed-');
+      sampleWeights[s.id] = isSeed ? 1.0 : 2.5;
+    }
+  }
+
   if (useSupabase) {
     loadEnvFiles();
     const { isCloudDatasetConfigured, fetchAllCloudNslSamples } = loadTsModule(
@@ -143,37 +203,35 @@ async function main() {
       );
       process.exit(1);
     }
-    console.log('Fetching team NSL clips from Supabase...');
+    console.log('Fetching native team NSL clips from Supabase...');
     const fetched = await fetchAllCloudNslSamples();
-    samples = fetched.samples;
-  } else {
-    const inputPath = path.resolve(process.cwd(), positional[0]);
-    if (!fs.existsSync(inputPath)) {
-      console.error(`Dataset file not found: ${inputPath}`);
-      process.exit(1);
+    console.log(`Fetched ${fetched.samples.length} cloud clip(s) from Supabase.`);
+    for (const s of fetched.samples) {
+      mergedById.set(s.id, s);
+      sampleWeights[s.id] = 2.5; // Prioritize native Nigerian contributor clips
     }
-    const rawJson = fs.readFileSync(inputPath, 'utf8');
-    const parsed = parseImportedDatasetJson(rawJson);
-    if (!parsed.ok) {
-      console.error(`Invalid dataset: ${parsed.error}`);
-      process.exit(1);
-    }
-    samples = parsed.dataset.samples;
   }
 
+  const samples = Array.from(mergedById.values());
   const counts = countSamplesByLabel(samples);
   const uniqueSigners = new Set(
     samples.map((sample) => normalizeSignerTag(sample.signerTag).toLowerCase())
   );
   console.log(
-    `Loaded ${samples.length} sample(s) across ${Object.keys(counts).length} label(s) from ${uniqueSigners.size} signer(s):`
+    `Loaded ${samples.length} sample(s) across ${Object.keys(counts).length} class(es) from ${uniqueSigners.size} signer bucket(s):`
   );
   for (const [labelId, count] of Object.entries(counts)) {
-    console.log(`  - ${labelId}: ${count} clip(s)`);
+    console.log(`  - ${labelId.padEnd(15)}: ${count} clip(s)`);
   }
 
   const startMs = Date.now();
-  const trained = trainNslModel(samples);
+  const trained = trainNslModel(samples, {
+    hiddenDim: 128,
+    hiddenDim2: 64,
+    epochs: 120,
+    augmentFactor: 5,
+    sampleWeights,
+  });
   if (!trained.ok) {
     console.error(`Training failed: ${trained.error}`);
     process.exit(1);
@@ -182,20 +240,72 @@ async function main() {
   const { model } = trained;
   const elapsedMs = Date.now() - startMs;
 
-  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-  fs.writeFileSync(outputPath, serializeModelJson(model), 'utf8');
+  const compactJson = serializeModelJson(model, true);
+  const roundtrip = parseImportedModelJson(compactJson);
+  if (!roundtrip.ok) {
+    throw new Error(`Serialized model failed roundtrip validation: ${roundtrip.error}`);
+  }
 
-  console.log(`\nTraining succeeded in ${elapsedMs}ms:`);
-  console.log(`  Classes (${model.classes.length}): ${model.classes.map((c) => c.name).join(', ')}`);
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  fs.writeFileSync(outputPath, compactJson, 'utf8');
+
+  // Detailed unseen-signer holdout breakdown
+  const holdoutSamples = samples.filter(
+    (s) => normalizeSignerTag(s.signerTag).toLowerCase() === 'seed-holdout'
+  );
+  if (holdoutSamples.length > 0) {
+    const perClass = new Map();
+    let idleTotal = 0;
+    let idleFalsePositives = 0;
+
+    for (const s of holdoutSamples) {
+      const seq =
+        s.labelId === NSL_IDLE_CLASS_ID
+          ? s.sequence
+          : resampleNslSequence(trimActiveNslFrames(s.sequence, 10), NSL_SEQUENCE_LENGTH);
+      const pred = predictSequence(roundtrip.model, seq);
+      const predId = roundtrip.model.classes[pred.topIndex]?.id;
+      const stat = perClass.get(s.labelId) || { ok: 0, total: 0 };
+      stat.total += 1;
+      if (predId === s.labelId) stat.ok += 1;
+      perClass.set(s.labelId, stat);
+
+      if (s.labelId === NSL_IDLE_CLASS_ID) {
+        idleTotal += 1;
+        if (predId !== NSL_IDLE_CLASS_ID && pred.confidence >= 0.56 && pred.margin >= 0.14) {
+          idleFalsePositives += 1;
+        }
+      }
+    }
+
+    console.log('\nHeld-Out Unseen Signer Per-Class Recall:');
+    for (const [labelId, stat] of perClass.entries()) {
+      const pct = ((stat.ok / Math.max(1, stat.total)) * 100).toFixed(1);
+      console.log(`  - ${labelId.padEnd(15)}: ${stat.ok}/${stat.total} (${pct}%)`);
+    }
+    if (idleTotal > 0) {
+      console.log(
+        `  * Idle False-Trigger Rate: ${idleFalsePositives}/${idleTotal} (${(
+          (idleFalsePositives / idleTotal) *
+          100
+        ).toFixed(1)}%)`
+      );
+    }
+  }
+
+  const visible = getVisibleModelClasses(model);
+  const sizeKb = (Buffer.byteLength(compactJson, 'utf8') / 1024).toFixed(1);
+  console.log(`\nTraining succeeded in ${(elapsedMs / 1000).toFixed(2)}s:`);
+  console.log(`  User-Facing Signs (${visible.length}): ${visible.map((c) => c.name).join(', ')}`);
   console.log(
-    `  Split (${model.metrics.splitStrategy ?? 'stratified-clip'}): ${model.metrics.trainCount} train / ${model.metrics.valCount} val (augmented 4x during training)`
+    `  Split (${model.metrics.splitStrategy ?? 'stratified-clip'}): ${model.metrics.trainCount} train / ${model.metrics.valCount} val (best epoch ${model.metrics.bestEpoch}/${model.metrics.epochs})`
   );
   console.log(
-    `  Train Acc: ${(model.metrics.trainAccuracy * 100).toFixed(1)}% | Val Acc: ${(
+    `  Train Acc: ${(model.metrics.trainAccuracy * 100).toFixed(1)}% | Unseen-Signer Val Acc: ${(
       model.metrics.valAccuracy * 100
-    ).toFixed(1)}% | Final Loss: ${model.metrics.finalLoss}`
+    ).toFixed(1)}% | Val Loss: ${model.metrics.bestValLoss}`
   );
-  console.log(`  Saved model weights -> ${outputPath}`);
+  console.log(`  Saved compact model (${sizeKb} KB) -> ${outputPath}`);
 }
 
 main().catch((err) => {

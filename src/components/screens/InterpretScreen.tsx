@@ -35,7 +35,11 @@ import {
   PlaybackState,
 } from '@/lib/speech';
 import type { TrackingFrame } from '@/lib/neuralVision';
-import { getNslModelSnapshot, subscribeNslModel } from '@/lib/nslModel';
+import {
+  getNslModelSnapshot,
+  getVisibleModelClasses,
+  subscribeNslModel,
+} from '@/lib/nslModel';
 import { signClassifier, type SignClassificationResult } from '@/lib/signClassifier';
 import { TranslationService } from '@/lib/translationClient';
 
@@ -72,7 +76,7 @@ export function InterpretScreen() {
     getNslModelSnapshot,
     () => null
   );
-  const isModelReady = Boolean(activeNslModel && activeNslModel.classes.length >= 2);
+  const isModelReady = getVisibleModelClasses(activeNslModel).length >= 2;
 
   const [demoStep, setDemoStep] = useState<GuidedDemoStep>('ready');
   const [activePhraseIndex, setActivePhraseIndex] = useState<number>(0);

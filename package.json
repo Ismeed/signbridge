@@ -8,6 +8,7 @@
     "build:css": "node scripts/build-css.js",
     "start": "next start",
     "lint": "eslint",
+    "seed:nsl": "node scripts/build-nsl-seed-dataset.mjs",
     "train:nsl": "node scripts/train-nsl-model.mjs"
   },
   "dependencies": {

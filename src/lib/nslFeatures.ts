@@ -340,3 +340,131 @@ export function evaluateSequenceQuality(
     isUsable: rawFrameCount >= NSL_MIN_RAW_FRAMES && handCoverageRatio >= 0.35,
   };
 }
+
+function isFrameSigningActive(vec: number[]): boolean {
+  const hasLeft = (vec[HAND_START_LEFT] ?? 0) >= 0.5;
+  const hasRight = (vec[HAND_START_RIGHT] ?? 0) >= 0.5;
+  if (!hasLeft && !hasRight) return false;
+
+  const speed =
+    Math.hypot(vec[141] ?? 0, vec[142] ?? 0) + Math.hypot(vec[143] ?? 0, vec[144] ?? 0);
+
+  // Normalized wrist Y = (wrist.y - shoulderCenter.y) / shoulderWidth:
+  // <= 1.05 means hand is raised into chest/face signing space; > 1.05 is hanging low at waist.
+  const leftElevated = hasLeft && (vec[HAND_START_LEFT + 2] ?? 1.5) <= 1.05;
+  const rightElevated = hasRight && (vec[HAND_START_RIGHT + 2] ?? 1.5) <= 1.05;
+
+  return leftElevated || rightElevated || speed >= 0.035;
+}
+
+/**
+ * Trims leading and trailing dead/idle frames (hands absent or hanging motionless below waist)
+ * while preserving a small onset/offset margin and at least `minKeepFrames` frames.
+ */
+export function trimActiveNslFrames(
+  vectors: number[][],
+  minKeepFrames = NSL_MIN_RAW_FRAMES
+): number[][] {
+  if (vectors.length <= minKeepFrames) {
+    return vectors;
+  }
+
+  let firstActive = -1;
+  let lastActive = -1;
+  for (let i = 0; i < vectors.length; i++) {
+    if (isFrameSigningActive(vectors[i])) {
+      if (firstActive === -1) firstActive = i;
+      lastActive = i;
+    }
+  }
+
+  // Fallback to any frame with visible hands if all hands stayed low/slow
+  if (firstActive === -1) {
+    for (let i = 0; i < vectors.length; i++) {
+      const v = vectors[i];
+      if ((v[HAND_START_LEFT] ?? 0) >= 0.5 || (v[HAND_START_RIGHT] ?? 0) >= 0.5) {
+        if (firstActive === -1) firstActive = i;
+        lastActive = i;
+      }
+    }
+  }
+
+  if (firstActive === -1 || lastActive === -1) {
+    return vectors;
+  }
+
+  let start = Math.max(0, firstActive - 2);
+  let end = Math.min(vectors.length, lastActive + 3);
+
+  while (end - start < minKeepFrames) {
+    if (start > 0) start -= 1;
+    if (end - start < minKeepFrames && end < vectors.length) end += 1;
+    if (start === 0 && end === vectors.length) break;
+  }
+
+  return vectors.slice(start, end);
+}
+
+function copyMirroredHandSlice(out: number[], dstOffset: number, src: number[], srcOffset: number): void {
+  const present = (src[srcOffset] ?? 0) >= 0.5 ? 1 : 0;
+  out[dstOffset] = present;
+  if (!present) return;
+
+  out[dstOffset + 1] = clampFinite(-(src[srcOffset + 1] ?? 0));
+  out[dstOffset + 2] = clampFinite(src[srcOffset + 2] ?? 0);
+
+  for (let j = 1; j < 21; j++) {
+    const sIdx = srcOffset + 3 + (j - 1) * 3;
+    const dIdx = dstOffset + 3 + (j - 1) * 3;
+    out[dIdx] = clampFinite(-(src[sIdx] ?? 0));
+    out[dIdx + 1] = clampFinite(src[sIdx + 1] ?? 0);
+    out[dIdx + 2] = clampFinite(src[sIdx + 2] ?? 0);
+  }
+}
+
+/**
+ * Applies an exact horizontal reflection + Left/Right anatomical swap to a single 145-dim frame.
+ * Makes recognition invariant to left- vs right-handed signing and camera mirroring.
+ */
+export function mirrorNslVector(vec: number[]): number[] {
+  const out = new Array<number>(NSL_FEATURE_DIM).fill(0);
+  const hasPose = (vec[0] ?? 0) >= 0.5 ? 1 : 0;
+  out[0] = hasPose;
+
+  if (hasPose) {
+    // Nose (joint 0 -> indices [1, 2])
+    out[1] = clampFinite(-(vec[1] ?? 0));
+    out[2] = clampFinite(vec[2] ?? 0);
+
+    // Swap (L_SHOULDER [3,4] <-> R_SHOULDER [5,6]), (L_ELBOW [7,8] <-> R_ELBOW [9,10]), (L_WRIST [11,12] <-> R_WRIST [13,14])
+    const pairs: Array<[number, number]> = [
+      [3, 5],
+      [7, 9],
+      [11, 13],
+    ];
+    for (const [leftIdx, rightIdx] of pairs) {
+      out[leftIdx] = clampFinite(-(vec[rightIdx] ?? 0));
+      out[leftIdx + 1] = clampFinite(vec[rightIdx + 1] ?? 0);
+      out[rightIdx] = clampFinite(-(vec[leftIdx] ?? 0));
+      out[rightIdx + 1] = clampFinite(vec[leftIdx + 1] ?? 0);
+    }
+  }
+
+  // Swap Left Hand [15..77] <-> Right Hand [78..140] with X negated
+  copyMirroredHandSlice(out, HAND_START_LEFT, vec, HAND_START_RIGHT);
+  copyMirroredHandSlice(out, HAND_START_RIGHT, vec, HAND_START_LEFT);
+
+  // Swap & X-reflect wrist velocities ([141,142] <-> [143,144])
+  out[141] = clampFinite(-(vec[143] ?? 0), 3);
+  out[142] = clampFinite(vec[144] ?? 0, 3);
+  out[143] = clampFinite(-(vec[141] ?? 0), 3);
+  out[144] = clampFinite(vec[142] ?? 0, 3);
+
+  return out;
+}
+
+/** Applies `mirrorNslVector` across an entire `[T x 145]` NSL feature sequence. */
+export function mirrorNslSequence(sequence: number[][]): number[][] {
+  return sequence.map(mirrorNslVector);
+}
+
